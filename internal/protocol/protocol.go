@@ -23,10 +23,11 @@ const (
 )
 
 type Command struct {
-	Op    Op
-	Key   string
-	Value []byte
-	Delta uint64
+	Op         Op
+	Key        string
+	Value      []byte
+	TTLSeconds uint64
+	Delta      uint64
 }
 
 type Parser struct {
@@ -62,10 +63,20 @@ func (p *Parser) ReadCommand() (Command, error) {
 		}
 		return Command{Op: OpGet, Key: fields[1]}, nil
 	case "set":
-		if len(fields) != 3 || !validKey(fields[1]) {
-			return Command{}, protocolError("usage: set <key> <bytes>")
+		if (len(fields) != 3 && len(fields) != 4) || !validKey(fields[1]) {
+			return Command{}, protocolError("usage: set <key> [ttl-seconds] <bytes>")
 		}
-		size, err := parseByteCount(fields[2])
+		ttlSeconds := uint64(0)
+		sizeToken := fields[2]
+		if len(fields) == 4 {
+			ttl, err := parseUintToken(fields[2], "TTL")
+			if err != nil {
+				return Command{}, err
+			}
+			ttlSeconds = ttl
+			sizeToken = fields[3]
+		}
+		size, err := parseByteCount(sizeToken)
 		if err != nil {
 			return Command{}, err
 		}
@@ -76,7 +87,7 @@ func (p *Parser) ReadCommand() (Command, error) {
 		if value[size] != '\r' || value[size+1] != '\n' {
 			return Command{}, protocolError("value must end with CRLF")
 		}
-		return Command{Op: OpSet, Key: fields[1], Value: value[:size]}, nil
+		return Command{Op: OpSet, Key: fields[1], Value: value[:size], TTLSeconds: ttlSeconds}, nil
 	case "delete":
 		if len(fields) != 2 || !validKey(fields[1]) {
 			return Command{}, protocolError("usage: delete <key>")

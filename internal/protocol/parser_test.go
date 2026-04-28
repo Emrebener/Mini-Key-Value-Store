@@ -23,6 +23,21 @@ func TestParserReadsSetWithByteCountedValue(t *testing.T) {
 	if string(cmd.Value) != "hello world" {
 		t.Fatalf("expected byte-counted value, got %q", cmd.Value)
 	}
+	if cmd.TTLSeconds != 0 {
+		t.Fatalf("expected legacy set to default to no expiration, got TTL %d", cmd.TTLSeconds)
+	}
+}
+
+func TestParserReadsSetWithTTL(t *testing.T) {
+	p := NewParser(bufio.NewReader(strings.NewReader("set greeting 60 11\r\nhello world\r\n")))
+
+	cmd, err := p.ReadCommand()
+	if err != nil {
+		t.Fatalf("expected command to parse: %v", err)
+	}
+	if cmd.Op != OpSet || cmd.Key != "greeting" || string(cmd.Value) != "hello world" || cmd.TTLSeconds != 60 {
+		t.Fatalf("unexpected set command with TTL: %#v", cmd)
+	}
 }
 
 func TestParserReadsSingleLineCommands(t *testing.T) {

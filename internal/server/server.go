@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
+	"time"
 
 	"github.com/Emrebener/Mini-Key-Value-Store/internal/protocol"
 	"github.com/Emrebener/Mini-Key-Value-Store/internal/store"
@@ -57,8 +59,21 @@ func execute(writer *bufio.Writer, kv *store.Store, command protocol.Command) er
 		}
 		return writeLine(writer, "END")
 	case protocol.OpSet:
-		kv.Set(command.Key, command.Value)
-		return writeLine(writer, "STORED")
+		if command.TTLSeconds > uint64(math.MaxInt64/int64(time.Second)) {
+			return writeLine(writer, "CLIENT_ERROR TTL is too large")
+		}
+		ttl := time.Duration(command.TTLSeconds) * time.Second
+		err := kv.Set(command.Key, command.Value, ttl)
+		switch {
+		case err == nil:
+			return writeLine(writer, "STORED")
+		case errors.Is(err, store.ErrValueTooLarge):
+			return writeLine(writer, "SERVER_ERROR value too large")
+		case errors.Is(err, store.ErrMemoryLimitExceeded):
+			return writeLine(writer, "SERVER_ERROR memory limit exceeded")
+		default:
+			return err
+		}
 	case protocol.OpDelete:
 		if kv.Delete(command.Key) {
 			return writeLine(writer, "DELETED")
@@ -75,6 +90,10 @@ func execute(writer *bufio.Writer, kv *store.Store, command protocol.Command) er
 			return writeLine(writer, "CLIENT_ERROR value is not an unsigned integer")
 		case errors.Is(err, store.ErrOverflow):
 			return writeLine(writer, "CLIENT_ERROR increment would overflow uint64")
+		case errors.Is(err, store.ErrValueTooLarge):
+			return writeLine(writer, "SERVER_ERROR value too large")
+		case errors.Is(err, store.ErrMemoryLimitExceeded):
+			return writeLine(writer, "SERVER_ERROR memory limit exceeded")
 		default:
 			return err
 		}

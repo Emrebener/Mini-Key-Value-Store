@@ -12,12 +12,32 @@ func TestSessionExecutesProtocolCommands(t *testing.T) {
 	var output bytes.Buffer
 	input := strings.NewReader("set counter 1\r\n1\r\nincr counter 41\r\nget counter\r\ndelete counter\r\nget counter\r\n")
 
-	if err := Serve(input, &output, store.New()); err != nil {
+	if err := Serve(input, &output, store.New(store.DefaultConfig())); err != nil {
 		t.Fatalf("serve connection: %v", err)
 	}
 
 	got := strings.TrimSuffix(output.String(), "\r\n")
 	want := "STORED\r\nVALUE 42\r\nVALUE counter 2\r\n42\r\nEND\r\nDELETED\r\nEND"
+	if got != want {
+		t.Fatalf("unexpected responses:\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}
+
+func TestSessionReturnsDeterministicLimitErrors(t *testing.T) {
+	var output bytes.Buffer
+	input := strings.NewReader("set big 5\r\n12345\r\nset full 4\r\n1234\r\nset extra 1\r\nx\r\n")
+	kv := store.New(store.Config{
+		MaxValueBytes:     4,
+		MaxMemoryBytes:    len("full") + 4 + 8,
+		ItemOverheadBytes: 8,
+	})
+
+	if err := Serve(input, &output, kv); err != nil {
+		t.Fatalf("serve connection: %v", err)
+	}
+
+	got := strings.TrimSuffix(output.String(), "\r\n")
+	want := "SERVER_ERROR value too large\r\nSTORED\r\nSERVER_ERROR memory limit exceeded"
 	if got != want {
 		t.Fatalf("unexpected responses:\nwant:\n%s\n\ngot:\n%s", want, got)
 	}
