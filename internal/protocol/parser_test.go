@@ -41,7 +41,7 @@ func TestParserReadsSetWithTTL(t *testing.T) {
 }
 
 func TestParserReadsSingleLineCommands(t *testing.T) {
-	p := NewParser(bufio.NewReader(strings.NewReader("get alpha\r\ndelete beta\r\nincr visits 3\r\n")))
+	p := NewParser(bufio.NewReader(strings.NewReader("get alpha\r\ndelete beta\r\nincr visits 3\r\nping\r\n")))
 
 	first, err := p.ReadCommand()
 	if err != nil {
@@ -65,6 +65,14 @@ func TestParserReadsSingleLineCommands(t *testing.T) {
 	}
 	if third.Op != OpIncr || third.Key != "visits" || third.Delta != 3 {
 		t.Fatalf("unexpected incr command: %#v", third)
+	}
+
+	fourth, err := p.ReadCommand()
+	if err != nil {
+		t.Fatalf("expected ping command: %v", err)
+	}
+	if fourth.Op != OpPing {
+		t.Fatalf("unexpected ping command: %#v", fourth)
 	}
 }
 

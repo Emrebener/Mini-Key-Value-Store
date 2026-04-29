@@ -20,6 +20,7 @@ const (
 	OpSet
 	OpDelete
 	OpIncr
+	OpPing
 )
 
 type Command struct {
@@ -57,6 +58,11 @@ func (p *Parser) ReadCommand() (Command, error) {
 	}
 
 	switch strings.ToLower(fields[0]) {
+	case "ping":
+		if len(fields) != 1 {
+			return Command{}, protocolError("usage: ping")
+		}
+		return Command{Op: OpPing}, nil
 	case "get":
 		if len(fields) != 2 || !validKey(fields[1]) {
 			return Command{}, protocolError("usage: get <key>")

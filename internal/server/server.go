@@ -43,6 +43,8 @@ func Serve(input io.Reader, output io.Writer, kv *store.Store) error {
 
 func execute(writer *bufio.Writer, kv *store.Store, command protocol.Command) error {
 	switch command.Op {
+	case protocol.OpPing:
+		return writeLine(writer, "PONG")
 	case protocol.OpGet:
 		item, ok := kv.Get(command.Key)
 		if !ok {

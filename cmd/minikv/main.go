@@ -36,7 +36,7 @@ func main() {
 }
 
 func loadConfig() config {
-	addr := flag.String("addr", "127.0.0.1:11211", "TCP address to listen on")
+	addr := flag.String("addr", "0.0.0.0:11211", "TCP address to listen on")
 	maxValueBytes := flag.Int("max-value-bytes", store.DefaultConfig().MaxValueBytes, "maximum bytes allowed in one value")
 	maxMemoryBytes := flag.Int("max-memory-bytes", store.DefaultConfig().MaxMemoryBytes, "maximum accounted key/value bytes before eviction")
 	itemOverheadBytes := flag.Int("item-overhead-bytes", store.DefaultConfig().ItemOverheadBytes, "explicit per-item bytes included in memory accounting")

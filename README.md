@@ -10,10 +10,15 @@ eviction. There is no persistence, replication, or clustering yet.
 ## Requirements
 
 - Go 1.22 or newer
+- Docker, optional
 
 ## Run
 
+By default the server listens on all interfaces so the same binary works inside
+containers. For local-only development, pass a loopback address explicitly.
+
 ```sh
+go run ./cmd/minikv
 go run ./cmd/minikv -addr 127.0.0.1:11211
 ```
 
@@ -31,6 +36,13 @@ go run ./cmd/minikv \
   -cleanup-interval 1m
 ```
 
+The same commands are available through `make`:
+
+```sh
+make test
+make run ADDR=127.0.0.1:11211
+```
+
 Memory accounting is intentionally explicit rather than pretending to match Go's
 runtime/map overhead exactly: each item counts `len(key) + len(value) +
 item-overhead-bytes`.
@@ -42,6 +54,43 @@ item and its accounted bytes. If a single item cannot fit under the memory
 limit, the write fails with `SERVER_ERROR memory limit exceeded` and an existing
 value for that key is left unchanged.
 
+## Docker
+
+Build the production image:
+
+```sh
+docker build -t mini-kv-store .
+```
+
+Run it with the default cache limits:
+
+```sh
+docker run --rm -p 11211:11211 mini-kv-store
+```
+
+Override the same operational flags you would use locally:
+
+```sh
+docker run --rm -p 11211:11211 mini-kv-store \
+  -addr 0.0.0.0:11211 \
+  -max-value-bytes 1048576 \
+  -max-memory-bytes 67108864 \
+  -item-overhead-bytes 64 \
+  -cleanup-interval 1m
+```
+
+Smoke-test a running server over the TCP protocol:
+
+```sh
+printf 'ping\r\n' | nc 127.0.0.1 11211
+```
+
+Expected response:
+
+```text
+PONG
+```
+
 ## Test
 
 ```sh
@@ -52,6 +101,20 @@ go test ./...
 
 Commands and responses use CRLF line endings. Keys are non-empty, have no
 whitespace/control characters, and are capped at 250 bytes.
+
+### `ping`
+
+Health/smoke command for operators and scripts.
+
+```text
+ping\r\n
+```
+
+Response:
+
+```text
+PONG\r\n
+```
 
 ### `set`
 

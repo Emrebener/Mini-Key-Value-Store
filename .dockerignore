@@ -1,0 +1,7 @@
+.git
+.github
+Dockerfile
+README.md
+bin/
+coverage.out
+tmp/
