@@ -4,8 +4,8 @@ A small Memcached-leaning key-value store built for the "Building a Key-Value
 Store From Scratch" series.
 
 The current implementation provides a TCP text protocol backed by an in-memory
-key-to-blob store with optional TTLs and deterministic memory limits. There is
-no persistence, eviction, replication, or clustering yet.
+key-to-blob store with optional TTLs, deterministic memory limits, and LRU
+eviction. There is no persistence, replication, or clustering yet.
 
 ## Requirements
 
@@ -34,6 +34,13 @@ go run ./cmd/minikv \
 Memory accounting is intentionally explicit rather than pretending to match Go's
 runtime/map overhead exactly: each item counts `len(key) + len(value) +
 item-overhead-bytes`.
+
+When a write would exceed `max-memory-bytes`, the store first removes expired
+items, then evicts least-recently-used live items until the write fits. `get`,
+successful `set`, and successful `incr` refresh recency. `delete` removes the
+item and its accounted bytes. If a single item cannot fit under the memory
+limit, the write fails with `SERVER_ERROR memory limit exceeded` and an existing
+value for that key is left unchanged.
 
 ## Test
 
@@ -71,6 +78,8 @@ STORED\r\n
 SERVER_ERROR value too large\r\n
 SERVER_ERROR memory limit exceeded\r\n
 ```
+
+Under memory pressure, `set` may evict older keys before returning `STORED`.
 
 ### `get`
 
@@ -130,3 +139,5 @@ SERVER_ERROR memory limit exceeded\r\n
 ```
 
 Incrementing an expired key returns `NOT_FOUND`.
+Successful increments refresh recency and may evict older keys if the rewritten
+counter needs more accounted bytes.

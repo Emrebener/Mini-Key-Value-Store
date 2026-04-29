@@ -38,7 +38,7 @@ func main() {
 func loadConfig() config {
 	addr := flag.String("addr", "127.0.0.1:11211", "TCP address to listen on")
 	maxValueBytes := flag.Int("max-value-bytes", store.DefaultConfig().MaxValueBytes, "maximum bytes allowed in one value")
-	maxMemoryBytes := flag.Int("max-memory-bytes", store.DefaultConfig().MaxMemoryBytes, "maximum accounted key/value bytes before writes fail")
+	maxMemoryBytes := flag.Int("max-memory-bytes", store.DefaultConfig().MaxMemoryBytes, "maximum accounted key/value bytes before eviction")
 	itemOverheadBytes := flag.Int("item-overhead-bytes", store.DefaultConfig().ItemOverheadBytes, "explicit per-item bytes included in memory accounting")
 	cleanupInterval := flag.Duration("cleanup-interval", time.Minute, "interval for expired-key cleanup; set to 0 to disable")
 	flag.Parse()

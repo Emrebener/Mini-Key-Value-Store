@@ -121,24 +121,180 @@ func TestStoreTreatsExpiredKeysAsMissingAndCleansAccounting(t *testing.T) {
 	}
 }
 
-func TestStoreRejectsWritesOverConfiguredValueOrMemoryLimits(t *testing.T) {
+func TestStoreRejectsValuesTooLargeAndItemsTooLargeForMemoryLimit(t *testing.T) {
 	s := New(Config{
 		MaxValueBytes:     4,
-		MaxMemoryBytes:    len("a") + 4 + 8,
-		ItemOverheadBytes: 8,
+		MaxMemoryBytes:    4,
+		ItemOverheadBytes: 0,
 	})
 
 	if err := s.Set("too-big", []byte("12345"), 0); !errors.Is(err, ErrValueTooLarge) {
 		t.Fatalf("expected ErrValueTooLarge, got %v", err)
 	}
-	if err := s.Set("a", []byte("1234"), 0); err != nil {
+	if err := s.Set("a", []byte("123"), 0); err != nil {
 		t.Fatalf("expected first value to fit exactly: %v", err)
 	}
-	if err := s.Set("b", []byte("1"), 0); !errors.Is(err, ErrMemoryLimitExceeded) {
+	if err := s.Set("too-wide", []byte("1"), 0); !errors.Is(err, ErrMemoryLimitExceeded) {
 		t.Fatalf("expected ErrMemoryLimitExceeded, got %v", err)
 	}
-	if got := s.MemoryBytes(); got != len("a")+4+8 {
+	if got := s.MemoryBytes(); got != len("a")+3 {
 		t.Fatalf("expected failed write not to change accounting, got %d", got)
+	}
+}
+
+func TestStoreEvictsLeastRecentlyUsedItemWhenSetExceedsMemoryLimit(t *testing.T) {
+	s := New(Config{
+		MaxValueBytes:     16,
+		MaxMemoryBytes:    6,
+		ItemOverheadBytes: 0,
+	})
+
+	if err := s.Set("a", []byte("11"), 0); err != nil {
+		t.Fatalf("set a: %v", err)
+	}
+	if err := s.Set("b", []byte("22"), 0); err != nil {
+		t.Fatalf("set b: %v", err)
+	}
+	if _, ok := s.Get("a"); !ok {
+		t.Fatal("expected get to find a")
+	}
+	if err := s.Set("c", []byte("33"), 0); err != nil {
+		t.Fatalf("set c should evict b: %v", err)
+	}
+
+	if _, ok := s.Get("b"); ok {
+		t.Fatal("expected least recently used key b to be evicted")
+	}
+	if _, ok := s.Get("a"); !ok {
+		t.Fatal("expected recently read key a to remain")
+	}
+	if _, ok := s.Get("c"); !ok {
+		t.Fatal("expected new key c to be stored")
+	}
+	if got := s.MemoryBytes(); got != 6 {
+		t.Fatalf("expected accounting for two stored items, got %d", got)
+	}
+}
+
+func TestStoreRemovesExpiredItemsBeforeEvictingLiveItems(t *testing.T) {
+	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+	s := New(Config{
+		MaxValueBytes:     16,
+		MaxMemoryBytes:    6,
+		ItemOverheadBytes: 0,
+		Now: func() time.Time {
+			return now
+		},
+	})
+
+	if err := s.Set("a", []byte("11"), time.Second); err != nil {
+		t.Fatalf("set a: %v", err)
+	}
+	if err := s.Set("b", []byte("22"), 0); err != nil {
+		t.Fatalf("set b: %v", err)
+	}
+
+	now = now.Add(2 * time.Second)
+	if err := s.Set("c", []byte("33"), 0); err != nil {
+		t.Fatalf("set c should reuse expired space: %v", err)
+	}
+
+	if _, ok := s.Get("a"); ok {
+		t.Fatal("expected expired key a to be gone")
+	}
+	if _, ok := s.Get("b"); !ok {
+		t.Fatal("expected live key b to remain")
+	}
+	if _, ok := s.Get("c"); !ok {
+		t.Fatal("expected new key c to be stored")
+	}
+	if got := s.MemoryBytes(); got != 6 {
+		t.Fatalf("expected accounting to exclude expired item, got %d", got)
+	}
+}
+
+func TestStoreIncrRefreshesRecencyForEviction(t *testing.T) {
+	s := New(Config{
+		MaxValueBytes:     16,
+		MaxMemoryBytes:    6,
+		ItemOverheadBytes: 0,
+	})
+
+	if err := s.Set("a", []byte("1"), 0); err != nil {
+		t.Fatalf("set a: %v", err)
+	}
+	if err := s.Set("b", []byte("22"), 0); err != nil {
+		t.Fatalf("set b: %v", err)
+	}
+	if _, err := s.Incr("a", 1); err != nil {
+		t.Fatalf("incr a: %v", err)
+	}
+	if err := s.Set("c", []byte("33"), 0); err != nil {
+		t.Fatalf("set c should evict b: %v", err)
+	}
+
+	if _, ok := s.Get("b"); ok {
+		t.Fatal("expected b to be evicted after incr refreshed a")
+	}
+	if got, ok := s.Get("a"); !ok || string(got.Value) != "2" {
+		t.Fatalf("expected incremented a to remain as 2, got %q found=%v", got.Value, ok)
+	}
+}
+
+func TestStoreDeleteRemovesAccountingBeforeLaterEviction(t *testing.T) {
+	s := New(Config{
+		MaxValueBytes:     16,
+		MaxMemoryBytes:    6,
+		ItemOverheadBytes: 0,
+	})
+
+	if err := s.Set("a", []byte("11"), 0); err != nil {
+		t.Fatalf("set a: %v", err)
+	}
+	if err := s.Set("b", []byte("22"), 0); err != nil {
+		t.Fatalf("set b: %v", err)
+	}
+	if !s.Delete("a") {
+		t.Fatal("expected delete to remove a")
+	}
+	if err := s.Set("c", []byte("33"), 0); err != nil {
+		t.Fatalf("set c should fit after delete: %v", err)
+	}
+
+	if _, ok := s.Get("b"); !ok {
+		t.Fatal("expected b to remain")
+	}
+	if _, ok := s.Get("c"); !ok {
+		t.Fatal("expected c to be stored")
+	}
+	if got := s.MemoryBytes(); got != 6 {
+		t.Fatalf("expected accounting for b and c, got %d", got)
+	}
+}
+
+func TestStoreSetDoesNotEvictKeyBeingUpdatedOnOverLimitFailure(t *testing.T) {
+	s := New(Config{
+		MaxValueBytes:     16,
+		MaxMemoryBytes:    4,
+		ItemOverheadBytes: 0,
+	})
+
+	if err := s.Set("a", []byte("1"), 0); err != nil {
+		t.Fatalf("set a: %v", err)
+	}
+	if err := s.Set("a", []byte("1234"), 0); !errors.Is(err, ErrMemoryLimitExceeded) {
+		t.Fatalf("expected ErrMemoryLimitExceeded, got %v", err)
+	}
+
+	got, ok := s.Get("a")
+	if !ok {
+		t.Fatal("expected old value to remain after failed update")
+	}
+	if string(got.Value) != "1" {
+		t.Fatalf("expected old value to remain after failed update, got %q", got.Value)
+	}
+	if got := s.MemoryBytes(); got != 2 {
+		t.Fatalf("expected failed update not to change accounting, got %d", got)
 	}
 }
 

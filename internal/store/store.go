@@ -1,6 +1,7 @@
 package store
 
 import (
+	"container/list"
 	"errors"
 	"math"
 	"strconv"
@@ -31,11 +32,13 @@ type storedItem struct {
 	value     []byte
 	expiresAt time.Time
 	size      int
+	element   *list.Element
 }
 
 type Store struct {
 	mu          sync.Mutex
 	items       map[string]storedItem
+	lru         *list.List
 	config      Config
 	memoryBytes int
 }
@@ -53,6 +56,7 @@ func New(config Config) *Store {
 	config = normalizeConfig(config)
 	return &Store{
 		items:  make(map[string]storedItem),
+		lru:    list.New(),
 		config: config,
 	}
 }
@@ -66,22 +70,34 @@ func (s *Store) Set(key string, value []byte, ttl time.Duration) error {
 	}
 
 	now := s.now()
-	s.removeIfExpiredLocked(key, now)
+	s.removeExpiredLocked(now)
 	oldSize := 0
 	if old, ok := s.items[key]; ok {
 		oldSize = old.size
 	}
 
 	size := s.itemSize(key, len(value))
-	projected := s.memoryBytes - oldSize + size
-	if projected > s.config.MaxMemoryBytes {
+	if size > s.config.MaxMemoryBytes {
 		return ErrMemoryLimitExceeded
 	}
+	projected := s.memoryBytes - oldSize + size
+	if projected > s.config.MaxMemoryBytes {
+		if !s.evictUntilFitsLocked(key, projected) {
+			return ErrMemoryLimitExceeded
+		}
+		projected = s.memoryBytes - oldSize + size
+	}
 
+	var element *list.Element
+	if old, ok := s.items[key]; ok {
+		s.lru.Remove(old.element)
+	}
+	element = s.lru.PushFront(key)
 	s.items[key] = storedItem{
 		value:     cloneBytes(value),
 		expiresAt: expiresAt(now, ttl),
 		size:      size,
+		element:   element,
 	}
 	s.memoryBytes = projected
 	return nil
@@ -99,6 +115,7 @@ func (s *Store) Get(key string) (Item, bool) {
 		s.deleteLocked(key, item)
 		return Item{}, false
 	}
+	s.lru.MoveToFront(item.element)
 	return Item{Value: cloneBytes(item.value)}, true
 }
 
@@ -149,16 +166,30 @@ func (s *Store) Incr(key string, delta uint64) (uint64, error) {
 		return 0, ErrValueTooLarge
 	}
 	nextSize := s.itemSize(key, len(nextValue))
+	if nextSize > s.config.MaxMemoryBytes {
+		return 0, ErrMemoryLimitExceeded
+	}
 	projected := s.memoryBytes - item.size + nextSize
 	if projected > s.config.MaxMemoryBytes {
-		return 0, ErrMemoryLimitExceeded
+		s.removeExpiredLocked(now)
+		item, ok = s.items[key]
+		if !ok {
+			return 0, ErrNotFound
+		}
+		projected = s.memoryBytes - item.size + nextSize
+		if projected > s.config.MaxMemoryBytes && !s.evictUntilFitsLocked(key, projected) {
+			return 0, ErrMemoryLimitExceeded
+		}
+		projected = s.memoryBytes - item.size + nextSize
 	}
 
 	s.items[key] = storedItem{
 		value:     nextValue,
 		expiresAt: item.expiresAt,
 		size:      nextSize,
+		element:   item.element,
 	}
+	s.lru.MoveToFront(item.element)
 	s.memoryBytes = projected
 	return next, nil
 }
@@ -185,6 +216,32 @@ func (s *Store) MemoryBytes() int {
 	return s.memoryBytes
 }
 
+func (s *Store) removeExpiredLocked(now time.Time) {
+	for key, item := range s.items {
+		if item.expired(now) {
+			s.deleteLocked(key, item)
+		}
+	}
+}
+
+func (s *Store) evictUntilFitsLocked(protectedKey string, projected int) bool {
+	for projected > s.config.MaxMemoryBytes {
+		element := s.lru.Back()
+		for element != nil && element.Value.(string) == protectedKey {
+			element = element.Prev()
+		}
+		if element == nil {
+			return false
+		}
+
+		key := element.Value.(string)
+		item := s.items[key]
+		s.deleteLocked(key, item)
+		projected -= item.size
+	}
+	return true
+}
+
 func (s *Store) itemSize(key string, valueBytes int) int {
 	return len(key) + valueBytes + s.config.ItemOverheadBytes
 }
@@ -193,16 +250,9 @@ func (s *Store) now() time.Time {
 	return s.config.Now()
 }
 
-func (s *Store) removeIfExpiredLocked(key string, now time.Time) {
-	item, ok := s.items[key]
-	if !ok || !item.expired(now) {
-		return
-	}
-	s.deleteLocked(key, item)
-}
-
 func (s *Store) deleteLocked(key string, item storedItem) {
 	delete(s.items, key)
+	s.lru.Remove(item.element)
 	s.memoryBytes -= item.size
 }
 
