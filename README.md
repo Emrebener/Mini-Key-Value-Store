@@ -91,6 +91,73 @@ Expected response:
 PONG
 ```
 
+## Benchmark comparison
+
+The repository includes a local comparison stack for MiniKV, Redis, and
+Memcached. It is a demonstrative benchmark for this project, not a definitive
+database ranking. Results depend on the host, Docker engine, CPU scheduling,
+service versions, and workload flags.
+
+The stack runs all servers in Docker and runs the benchmark client in Docker on
+the same Compose network. MiniKV uses the same image built from this
+repository and the same TCP protocol path shown above. Redis and Memcached are
+benchmarked through their native protocols; MiniKV does not implement either
+protocol for compatibility.
+
+Start the services:
+
+```sh
+docker compose up -d --build minikv redis memcached
+```
+
+The services publish fixed host ports for inspection: MiniKV on `11211`,
+Redis on `16379`, and Memcached on `11212`. The benchmark itself uses Docker
+service names on the internal Compose network.
+
+Run the default benchmark from a Dockerized Go client:
+
+```sh
+docker compose run --rm bench
+```
+
+Or use the Make targets:
+
+```sh
+make bench-stack-up
+make bench
+make bench-stack-down
+```
+
+The benchmark writes `N` fixed-size values, then reads the same keys back, and
+repeats that sequence many times for each service. Output is tab-separated and
+reports one row per service/workload:
+
+```text
+service	workload	count	min	mean	p50	p95	max	ops/sec
+```
+
+Useful flags:
+
+```sh
+docker compose run --rm bench \
+  -runs 10 \
+  -keys 5000 \
+  -value-bytes 256 \
+  -services minikv,redis,memcached
+```
+
+For a quick smoke benchmark:
+
+```sh
+docker compose run --rm bench -runs 2 -keys 100 -value-bytes 64
+```
+
+Stop and remove the stack when finished:
+
+```sh
+docker compose down
+```
+
 ## Test
 
 ```sh

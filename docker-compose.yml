@@ -1,0 +1,42 @@
+services:
+  minikv:
+    build: .
+    image: mini-kv-store:latest
+    command:
+      - -addr
+      - 0.0.0.0:11211
+      - -max-memory-bytes
+      - "67108864"
+    ports:
+      - "11211:11211"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "16379:6379"
+
+  memcached:
+    image: memcached:1.6-alpine
+    ports:
+      - "11212:11211"
+
+  bench:
+    image: golang:1.22-alpine
+    working_dir: /src
+    volumes:
+      - .:/src:ro
+    depends_on:
+      - minikv
+      - redis
+      - memcached
+    entrypoint:
+      - go
+      - run
+      - ./cmd/minikv-bench
+      - -minikv-addr
+      - minikv:11211
+      - -redis-addr
+      - redis:6379
+      - -memcached-addr
+      - memcached:11211
+    command: []
