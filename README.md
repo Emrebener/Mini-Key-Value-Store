@@ -1,3 +1,5 @@
+<img width="2172" height="724" alt="image" src="https://github.com/user-attachments/assets/b73f32e9-badc-4ab7-9dfc-90c55d60ed98" />
+
 # Mini Key-Value Store
 
 A small Memcached-leaning key-value store built for the "Building a Key-Value
