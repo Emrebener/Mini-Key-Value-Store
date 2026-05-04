@@ -56,25 +56,24 @@ func Run(ctx context.Context, dial Dialer, workload Workload) ([]Result, error) 
 	writes := make([]time.Duration, 0, totalOps)
 	reads := make([]time.Duration, 0, totalOps)
 
-	writeStart := time.Now()
+	var writeWall, readWall time.Duration
 	for run := 0; run < workload.Runs; run++ {
+		writeRunStart := time.Now()
 		runWrites, err := runPhase(ctx, clients, workload, run, payload, phaseWrite)
 		if err != nil {
 			return nil, err
 		}
+		writeWall += time.Since(writeRunStart)
 		writes = append(writes, runWrites...)
-	}
-	writeWall := time.Since(writeStart)
 
-	readStart := time.Now()
-	for run := 0; run < workload.Runs; run++ {
+		readRunStart := time.Now()
 		runReads, err := runPhase(ctx, clients, workload, run, payload, phaseRead)
 		if err != nil {
 			return nil, err
 		}
+		readWall += time.Since(readRunStart)
 		reads = append(reads, runReads...)
 	}
-	readWall := time.Since(readStart)
 
 	name := clients[0].Name()
 	return []Result{
