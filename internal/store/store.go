@@ -3,9 +3,6 @@ package store
 import (
 	"container/list"
 	"errors"
-	"math"
-	"strconv"
-	"sync"
 	"time"
 )
 
@@ -17,10 +14,13 @@ var (
 	ErrMemoryLimitExceeded = errors.New("memory limit exceeded")
 )
 
+const DefaultShards = 16
+
 type Config struct {
 	MaxValueBytes     int
 	MaxMemoryBytes    int
 	ItemOverheadBytes int
+	Shards            int
 	Now               func() time.Time
 }
 
@@ -35,13 +35,11 @@ type storedItem struct {
 	element   *list.Element
 }
 
+// Store is a sharded key-value cache. Keys are hashed to one of
+// config.Shards independently-locked shards; each shard owns its own
+// LRU and memory budget. Public methods are concurrency-safe.
 type Store struct {
-	mu          sync.Mutex
-	items       map[string]storedItem
-	lru         *list.List
-	config      Config
-	memoryBytes int
-	ttlCount    int
+	shards []*shard
 }
 
 func DefaultConfig() Config {
@@ -49,17 +47,22 @@ func DefaultConfig() Config {
 		MaxValueBytes:     1024 * 1024,
 		MaxMemoryBytes:    64 * 1024 * 1024,
 		ItemOverheadBytes: 64,
+		Shards:            DefaultShards,
 		Now:               time.Now,
 	}
 }
 
 func New(config Config) *Store {
 	config = normalizeConfig(config)
-	return &Store{
-		items:  make(map[string]storedItem),
-		lru:    list.New(),
-		config: config,
+	perShardMemory := config.MaxMemoryBytes / config.Shards
+	if perShardMemory < 1 {
+		perShardMemory = 1
 	}
+	shards := make([]*shard, config.Shards)
+	for i := range shards {
+		shards[i] = newShard(config, perShardMemory)
+	}
+	return &Store{shards: shards}
 }
 
 // Set stores value under key with the given TTL.
@@ -68,220 +71,55 @@ func New(config Config) *Store {
 // mutate the slice after Set returns. Get returns a private copy, so callers
 // may safely mutate slices returned from Get.
 func (s *Store) Set(key string, value []byte, ttl time.Duration) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if len(value) > s.config.MaxValueBytes {
-		return ErrValueTooLarge
-	}
-
-	now := s.now()
-	oldSize := 0
-	if old, ok := s.items[key]; ok {
-		if old.expired(now) {
-			s.deleteLocked(key, old)
-		} else {
-			oldSize = old.size
-		}
-	}
-
-	size := s.itemSize(key, len(value))
-	if size > s.config.MaxMemoryBytes {
-		return ErrMemoryLimitExceeded
-	}
-	projected := s.memoryBytes - oldSize + size
-	if projected > s.config.MaxMemoryBytes {
-		if s.ttlCount > 0 {
-			s.removeExpiredLocked(now)
-			oldSize = 0
-			if old, ok := s.items[key]; ok {
-				oldSize = old.size
-			}
-			projected = s.memoryBytes - oldSize + size
-		}
-		if projected > s.config.MaxMemoryBytes {
-			if !s.evictUntilFitsLocked(key, projected) {
-				return ErrMemoryLimitExceeded
-			}
-			projected = s.memoryBytes - oldSize + size
-		}
-	}
-
-	var element *list.Element
-	if old, ok := s.items[key]; ok {
-		s.lru.Remove(old.element)
-	}
-	element = s.lru.PushFront(key)
-	expiry := expiresAt(now, ttl)
-	s.items[key] = storedItem{
-		value:     value,
-		expiresAt: expiry,
-		size:      size,
-		element:   element,
-	}
-	s.memoryBytes = projected
-	if !expiry.IsZero() {
-		s.ttlCount++
-	}
-	return nil
+	return s.shardFor(key).set(key, value, ttl)
 }
 
 func (s *Store) Get(key string) (Item, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	item, ok := s.items[key]
-	if !ok {
-		return Item{}, false
-	}
-	if item.expired(s.now()) {
-		s.deleteLocked(key, item)
-		return Item{}, false
-	}
-	s.lru.MoveToFront(item.element)
-	return Item{Value: cloneBytes(item.value)}, true
+	return s.shardFor(key).get(key)
 }
 
 func (s *Store) Delete(key string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	item, ok := s.items[key]
-	if !ok {
-		return false
-	}
-	if item.expired(s.now()) {
-		s.deleteLocked(key, item)
-		return false
-	}
-	s.deleteLocked(key, item)
-	return true
+	return s.shardFor(key).delete(key)
 }
 
 func (s *Store) Incr(key string, delta uint64) (uint64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	item, ok := s.items[key]
-	if !ok {
-		return 0, ErrNotFound
-	}
-	now := s.now()
-	if item.expired(now) {
-		s.deleteLocked(key, item)
-		return 0, ErrNotFound
-	}
-	if !isDecimal(item.value) {
-		return 0, ErrNotInteger
-	}
-
-	current, err := strconv.ParseUint(string(item.value), 10, 64)
-	if err != nil {
-		return 0, ErrNotInteger
-	}
-	if math.MaxUint64-current < delta {
-		return 0, ErrOverflow
-	}
-
-	next := current + delta
-	nextValue := []byte(strconv.FormatUint(next, 10))
-	if len(nextValue) > s.config.MaxValueBytes {
-		return 0, ErrValueTooLarge
-	}
-	nextSize := s.itemSize(key, len(nextValue))
-	if nextSize > s.config.MaxMemoryBytes {
-		return 0, ErrMemoryLimitExceeded
-	}
-	projected := s.memoryBytes - item.size + nextSize
-	if projected > s.config.MaxMemoryBytes {
-		if s.ttlCount > 0 {
-			s.removeExpiredLocked(now)
-			item, ok = s.items[key]
-			if !ok {
-				return 0, ErrNotFound
-			}
-			projected = s.memoryBytes - item.size + nextSize
-		}
-		if projected > s.config.MaxMemoryBytes && !s.evictUntilFitsLocked(key, projected) {
-			return 0, ErrMemoryLimitExceeded
-		}
-		projected = s.memoryBytes - item.size + nextSize
-	}
-
-	s.items[key] = storedItem{
-		value:     nextValue,
-		expiresAt: item.expiresAt,
-		size:      nextSize,
-		element:   item.element,
-	}
-	s.lru.MoveToFront(item.element)
-	s.memoryBytes = projected
-	return next, nil
+	return s.shardFor(key).incr(key, delta)
 }
 
 func (s *Store) CleanupExpired() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := s.now()
-	removed := 0
-	for key, item := range s.items {
-		if item.expired(now) {
-			s.deleteLocked(key, item)
-			removed++
-		}
+	total := 0
+	for _, sh := range s.shards {
+		total += sh.cleanupExpired()
 	}
-	return removed
+	return total
 }
 
 func (s *Store) MemoryBytes() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.memoryBytes
-}
-
-func (s *Store) removeExpiredLocked(now time.Time) {
-	for key, item := range s.items {
-		if item.expired(now) {
-			s.deleteLocked(key, item)
-		}
+	total := 0
+	for _, sh := range s.shards {
+		total += sh.memoryBytesSnapshot()
 	}
+	return total
 }
 
-func (s *Store) evictUntilFitsLocked(protectedKey string, projected int) bool {
-	for projected > s.config.MaxMemoryBytes {
-		element := s.lru.Back()
-		for element != nil && element.Value.(string) == protectedKey {
-			element = element.Prev()
-		}
-		if element == nil {
-			return false
-		}
+func (s *Store) shardFor(key string) *shard {
+	return s.shards[shardIndex(key, len(s.shards))]
+}
 
-		key := element.Value.(string)
-		item := s.items[key]
-		s.deleteLocked(key, item)
-		projected -= item.size
+// shardIndex hashes key with FNV-1a-32 and reduces to [0, n). Inlined
+// rather than using hash/fnv's allocating constructors so the hot path
+// is allocation-free.
+func shardIndex(key string, n int) uint32 {
+	const (
+		offset uint32 = 2166136261
+		prime  uint32 = 16777619
+	)
+	h := offset
+	for i := 0; i < len(key); i++ {
+		h ^= uint32(key[i])
+		h *= prime
 	}
-	return true
-}
-
-func (s *Store) itemSize(key string, valueBytes int) int {
-	return len(key) + valueBytes + s.config.ItemOverheadBytes
-}
-
-func (s *Store) now() time.Time {
-	return s.config.Now()
-}
-
-func (s *Store) deleteLocked(key string, item storedItem) {
-	delete(s.items, key)
-	s.lru.Remove(item.element)
-	s.memoryBytes -= item.size
-	if !item.expiresAt.IsZero() {
-		s.ttlCount--
-	}
+	return h % uint32(n)
 }
 
 func normalizeConfig(config Config) Config {
@@ -294,6 +132,9 @@ func normalizeConfig(config Config) Config {
 	}
 	if config.ItemOverheadBytes < 0 {
 		config.ItemOverheadBytes = defaults.ItemOverheadBytes
+	}
+	if config.Shards <= 0 {
+		config.Shards = defaults.Shards
 	}
 	if config.Now == nil {
 		config.Now = defaults.Now

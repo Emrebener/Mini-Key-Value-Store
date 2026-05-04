@@ -124,6 +124,7 @@ func TestStoreRejectsValuesTooLargeAndItemsTooLargeForMemoryLimit(t *testing.T) 
 		MaxValueBytes:     4,
 		MaxMemoryBytes:    4,
 		ItemOverheadBytes: 0,
+		Shards:            1,
 	})
 
 	if err := s.Set("too-big", []byte("12345"), 0); !errors.Is(err, ErrValueTooLarge) {
@@ -145,6 +146,7 @@ func TestStoreEvictsLeastRecentlyUsedItemWhenSetExceedsMemoryLimit(t *testing.T)
 		MaxValueBytes:     16,
 		MaxMemoryBytes:    6,
 		ItemOverheadBytes: 0,
+		Shards:            1,
 	})
 
 	if err := s.Set("a", []byte("11"), 0); err != nil {
@@ -180,6 +182,7 @@ func TestStoreRemovesExpiredItemsBeforeEvictingLiveItems(t *testing.T) {
 		MaxValueBytes:     16,
 		MaxMemoryBytes:    6,
 		ItemOverheadBytes: 0,
+		Shards:            1,
 		Now: func() time.Time {
 			return now
 		},
@@ -216,6 +219,7 @@ func TestStoreIncrRefreshesRecencyForEviction(t *testing.T) {
 		MaxValueBytes:     16,
 		MaxMemoryBytes:    6,
 		ItemOverheadBytes: 0,
+		Shards:            1,
 	})
 
 	if err := s.Set("a", []byte("1"), 0); err != nil {
@@ -244,6 +248,7 @@ func TestStoreDeleteRemovesAccountingBeforeLaterEviction(t *testing.T) {
 		MaxValueBytes:     16,
 		MaxMemoryBytes:    6,
 		ItemOverheadBytes: 0,
+		Shards:            1,
 	})
 
 	if err := s.Set("a", []byte("11"), 0); err != nil {
@@ -275,6 +280,7 @@ func TestStoreSetDoesNotEvictKeyBeingUpdatedOnOverLimitFailure(t *testing.T) {
 		MaxValueBytes:     16,
 		MaxMemoryBytes:    4,
 		ItemOverheadBytes: 0,
+		Shards:            1,
 	})
 
 	if err := s.Set("a", []byte("1"), 0); err != nil {

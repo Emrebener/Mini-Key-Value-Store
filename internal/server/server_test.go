@@ -30,6 +30,7 @@ func TestSessionReturnsDeterministicLimitErrors(t *testing.T) {
 		MaxValueBytes:     4,
 		MaxMemoryBytes:    8,
 		ItemOverheadBytes: 0,
+		Shards:            1,
 	})
 
 	if err := Serve(input, &output, kv); err != nil {
@@ -50,6 +51,7 @@ func TestSessionEvictsOlderKeyUnderMemoryPressure(t *testing.T) {
 		MaxValueBytes:     8,
 		MaxMemoryBytes:    6,
 		ItemOverheadBytes: 0,
+		Shards:            1,
 	})
 
 	if err := Serve(input, &output, kv); err != nil {
