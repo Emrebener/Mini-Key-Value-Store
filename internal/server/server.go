@@ -105,6 +105,9 @@ func execute(writer *bufio.Writer, kv *store.Store, command protocol.Command) er
 }
 
 func writeLine(writer *bufio.Writer, line string) error {
-	_, err := writer.WriteString(line + "\r\n")
+	if _, err := writer.WriteString(line); err != nil {
+		return err
+	}
+	_, err := writer.WriteString("\r\n")
 	return err
 }

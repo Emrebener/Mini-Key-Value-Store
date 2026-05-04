@@ -40,17 +40,17 @@ func NewParser(reader *bufio.Reader) *Parser {
 }
 
 func (p *Parser) ReadCommand() (Command, error) {
-	line, err := p.reader.ReadString('\n')
+	lineBytes, err := readLineSlice(p.reader)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return Command{}, io.EOF
 		}
 		return Command{}, err
 	}
-	line, err = trimCRLF(line)
-	if err != nil {
-		return Command{}, err
+	if len(lineBytes) < 2 || lineBytes[len(lineBytes)-2] != '\r' {
+		return Command{}, protocolError("command line must end with CRLF")
 	}
+	line := string(lineBytes[:len(lineBytes)-2])
 
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
@@ -113,11 +113,15 @@ func (p *Parser) ReadCommand() (Command, error) {
 	}
 }
 
-func trimCRLF(line string) (string, error) {
-	if !strings.HasSuffix(line, "\r\n") {
-		return "", protocolError("command line must end with CRLF")
+// readLineSlice reads through the next '\n' and returns a slice into the
+// reader's internal buffer. The caller must consume the slice before the next
+// read — that's why the parser stringifies it immediately.
+func readLineSlice(reader *bufio.Reader) ([]byte, error) {
+	line, err := reader.ReadSlice('\n')
+	if err == bufio.ErrBufferFull {
+		return nil, protocolError("command line too long")
 	}
-	return strings.TrimSuffix(line, "\r\n"), nil
+	return line, err
 }
 
 func parseByteCount(token string) (int, error) {
