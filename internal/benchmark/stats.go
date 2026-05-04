@@ -16,7 +16,7 @@ type Summary struct {
 	OpsPerSec float64
 }
 
-func Summarize(samples []time.Duration) Summary {
+func Summarize(samples []time.Duration, wallClock time.Duration) Summary {
 	if len(samples) == 0 {
 		return Summary{}
 	}
@@ -31,6 +31,11 @@ func Summarize(samples []time.Duration) Summary {
 		total += sample
 	}
 
+	opsPerSec := 0.0
+	if wallClock > 0 {
+		opsPerSec = float64(len(sorted)) / wallClock.Seconds()
+	}
+
 	return Summary{
 		Count:     len(sorted),
 		Min:       sorted[0],
@@ -38,7 +43,7 @@ func Summarize(samples []time.Duration) Summary {
 		P50:       percentile(sorted, 50),
 		P95:       percentile(sorted, 95),
 		Max:       sorted[len(sorted)-1],
-		OpsPerSec: float64(len(sorted)) / total.Seconds(),
+		OpsPerSec: opsPerSec,
 	}
 }
 

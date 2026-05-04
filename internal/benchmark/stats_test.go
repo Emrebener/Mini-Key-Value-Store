@@ -11,7 +11,7 @@ func TestSummarizeComputesLatencyStatistics(t *testing.T) {
 		10 * time.Millisecond,
 		100 * time.Millisecond,
 		20 * time.Millisecond,
-	})
+	}, 200*time.Millisecond)
 
 	if summary.Count != 4 {
 		t.Fatalf("Count = %d, want 4", summary.Count)
@@ -31,17 +31,25 @@ func TestSummarizeComputesLatencyStatistics(t *testing.T) {
 	if summary.Max != 100*time.Millisecond {
 		t.Fatalf("Max = %s, want 100ms", summary.Max)
 	}
-	if summary.OpsPerSec != 25 {
-		t.Fatalf("OpsPerSec = %.2f, want 25", summary.OpsPerSec)
+	if summary.OpsPerSec != 20 {
+		t.Fatalf("OpsPerSec = %.2f, want 20", summary.OpsPerSec)
 	}
 }
 
 func TestSummarizeHandlesNoSamples(t *testing.T) {
-	summary := Summarize(nil)
+	summary := Summarize(nil, time.Second)
 
 	if summary.Count != 0 {
 		t.Fatalf("Count = %d, want 0", summary.Count)
 	}
+	if summary.OpsPerSec != 0 {
+		t.Fatalf("OpsPerSec = %.2f, want 0", summary.OpsPerSec)
+	}
+}
+
+func TestSummarizeZeroWallClockYieldsZeroOpsPerSec(t *testing.T) {
+	summary := Summarize([]time.Duration{time.Millisecond}, 0)
+
 	if summary.OpsPerSec != 0 {
 		t.Fatalf("OpsPerSec = %.2f, want 0", summary.OpsPerSec)
 	}

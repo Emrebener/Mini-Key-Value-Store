@@ -29,6 +29,7 @@ func main() {
 		valueBytes    = flag.Int("value-bytes", 128, "fixed payload size in bytes")
 		prefix        = flag.String("prefix", "minikv-bench", "key prefix")
 		timeout       = flag.Duration("timeout", 3*time.Second, "per-operation network deadline")
+		concurrency   = flag.Int("concurrency", 1, "parallel client connections per service")
 	)
 	flag.Parse()
 
@@ -43,29 +44,22 @@ func main() {
 	}
 
 	workload := benchmark.Workload{
-		Runs:       *runs,
-		Keys:       *keys,
-		ValueBytes: *valueBytes,
-		KeyPrefix:  *prefix,
+		Runs:        *runs,
+		Keys:        *keys,
+		ValueBytes:  *valueBytes,
+		KeyPrefix:   *prefix,
+		Concurrency: *concurrency,
 	}
 	ctx := context.Background()
 
 	fmt.Printf("service\tworkload\tcount\tmin\tmean\tp50\tp95\tmax\tops/sec\n")
 	for _, svc := range selected {
-		client, err := svc.dial(ctx, svc.addr, *timeout)
+		dial := func(ctx context.Context) (benchmark.Client, error) {
+			return svc.dial(ctx, svc.addr, *timeout)
+		}
+		results, err := benchmark.Run(ctx, dial, workload)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "dial %s at %s: %v\n", svc.name, svc.addr, err)
-			os.Exit(1)
-		}
-
-		results, runErr := benchmark.Run(ctx, client, workload)
-		closeErr := client.Close()
-		if runErr != nil {
-			fmt.Fprintf(os.Stderr, "benchmark %s: %v\n", svc.name, runErr)
-			os.Exit(1)
-		}
-		if closeErr != nil {
-			fmt.Fprintf(os.Stderr, "close %s: %v\n", svc.name, closeErr)
+			fmt.Fprintf(os.Stderr, "benchmark %s: %v\n", svc.name, err)
 			os.Exit(1)
 		}
 		for _, result := range results {
