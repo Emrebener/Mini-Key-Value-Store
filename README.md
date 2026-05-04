@@ -4,7 +4,7 @@
 
 A small, Memcached-leaning key-value cache server written in Go from scratch.
 
-MiniKV is the first project in the [Reinventing the Wheel](https://emrebener.com/topics/reinventing-the-wheel-series/building-a-key-value-store-from-scratch)
+MiniKV is the first project in the [Reinventing the Wheel](https://emrebener.com/topics/reinventing-the-wheel-series/)
 series — building familiar tools from the ground up to understand the parts
 tutorials usually skip: wire protocols that handle arbitrary bytes, consistent
 expiration semantics, memory accounting that does not corrupt under load, and
@@ -14,8 +14,37 @@ It is a learning project, not production software. There is no persistence,
 replication, or clustering.
 
 **What it does:** stores opaque byte values under string keys over TCP, with
-optional per-key TTLs, a configurable memory budget, and LRU eviction once that
-budget is full.
+optional per-key TTLs, a configurable memory budget, an intrusive-LRU eviction
+policy once that budget is full, and a sharded keyspace for concurrent
+throughput.
+
+## Performance
+
+The same Compose stack benchmarks MiniKV against Redis and Memcached at vol 1's
+published configuration (5 runs × 1000 keys × 128-byte values), at
+concurrency=1 (sequential, single connection) and concurrency=8 (eight parallel
+client connections). Vol 2 columns are medians of three repeated runs.
+
+| service   | workload | vol 1, conc=1 | vol 2, conc=1 | vol 1, conc=8 | vol 2, conc=8 |
+| --------- | -------- | ------------: | ------------: | ------------: | ------------: |
+| minikv    | write    |        16,935 |    **47,921** |        14,378 |   **215,635** |
+| minikv    | read     |        43,622 |        46,716 |       211,245 |       221,014 |
+| redis     | write    |        50,654 |        46,190 |       123,470 |       125,836 |
+| redis     | read     |        51,389 |        46,393 |       115,939 |       135,852 |
+| memcached | write    |        52,027 |        50,268 |       260,140 |       280,133 |
+| memcached | read     |        52,682 |        48,819 |       282,169 |       281,252 |
+
+Numbers are operations per second. Redis and Memcached columns are calibration
+anchors, not a competition target — the goal of vol 2 was *measurable*
+improvement against vol 1's baseline, not parity with production caches. The
+concurrency=8 column carries the more interesting story: vol 1 MiniKV writes
+*regress* under contention (14k vs 17k single-connection) because of a
+performance bug in the write path; vol 2 scales them by ~15× and now sits
+ahead of Redis at the same concurrency. The vol 1 → vol 2 deltas are the
+journey covered in [the Reinventing the Wheel
+series](https://emrebener.com/topics/reinventing-the-wheel-series/); the
+[Benchmark comparison](#benchmark-comparison) section below covers how to
+reproduce the numbers.
 
 ## Getting started
 
@@ -53,14 +82,22 @@ response. The [Protocol](#protocol) section below lists every command.
 
 ## What you can do next
 
-- **Read the [blog post](https://emrebener.com/topics/reinventing-the-wheel-series/building-a-key-value-store-from-scratch)**
-  for the design decisions and trade-offs behind the code.
+- **Read the blog posts.** Vol 1, [Building a Key-Value Store From
+  Scratch](https://emrebener.com/topics/reinventing-the-wheel-series/building-a-key-value-store-from-scratch),
+  walks through the original design and trade-offs. Vol 2 (linked from the
+  [series page](https://emrebener.com/topics/reinventing-the-wheel-series/))
+  covers the profiler-driven optimization journey behind the numbers in the
+  Performance section above.
 - **Run the tests:** `go test ./...` (or `make test`).
 - **Tune the cache** with the flags in [Configuration](#configuration).
 - **Compare it to Redis and Memcached** with the [benchmark stack](#benchmark-comparison).
-- **Read the source.** The layout mirrors the design: `internal/protocol` parses
-  commands, `internal/store` owns the map and eviction, `internal/server` wires
-  them to TCP. Each layer has its own tests.
+- **Profile it** by passing `-pprof-addr 127.0.0.1:6060` to `cmd/minikv` and
+  scraping `http://127.0.0.1:6060/debug/pprof/` with `go tool pprof`. The
+  Compose stack publishes the same endpoint on host port `16060`.
+- **Read the source.** The layout mirrors the design: `internal/protocol`
+  parses commands; `internal/store` owns the sharded map (`store.go`,
+  `shard.go`), the intrusive LRU (`lru.go`), and the eviction logic;
+  `internal/server` wires them to TCP. Each layer has its own tests.
 
 ## Configuration
 
@@ -133,7 +170,8 @@ make bench            # docker compose run --rm bench
 make bench-stack-down # docker compose down
 ```
 
-Host ports for inspection: MiniKV `11211`, Redis `16379`, Memcached `11212`.
+Host ports for inspection: MiniKV `11211` (with pprof on `16060`), Redis
+`16379`, Memcached `11212`.
 
 The benchmark writes `N` fixed-size values, reads them back, and repeats that
 sequence many times for each service. Output is tab-separated:
