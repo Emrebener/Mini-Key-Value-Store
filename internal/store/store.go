@@ -61,6 +61,11 @@ func New(config Config) *Store {
 	}
 }
 
+// Set stores value under key with the given TTL.
+//
+// The store takes ownership of value's underlying bytes. Callers must not
+// mutate the slice after Set returns. Get returns a private copy, so callers
+// may safely mutate slices returned from Get.
 func (s *Store) Set(key string, value []byte, ttl time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -70,10 +75,13 @@ func (s *Store) Set(key string, value []byte, ttl time.Duration) error {
 	}
 
 	now := s.now()
-	s.removeExpiredLocked(now)
 	oldSize := 0
 	if old, ok := s.items[key]; ok {
-		oldSize = old.size
+		if old.expired(now) {
+			s.deleteLocked(key, old)
+		} else {
+			oldSize = old.size
+		}
 	}
 
 	size := s.itemSize(key, len(value))
@@ -82,10 +90,18 @@ func (s *Store) Set(key string, value []byte, ttl time.Duration) error {
 	}
 	projected := s.memoryBytes - oldSize + size
 	if projected > s.config.MaxMemoryBytes {
-		if !s.evictUntilFitsLocked(key, projected) {
-			return ErrMemoryLimitExceeded
+		s.removeExpiredLocked(now)
+		oldSize = 0
+		if old, ok := s.items[key]; ok {
+			oldSize = old.size
 		}
 		projected = s.memoryBytes - oldSize + size
+		if projected > s.config.MaxMemoryBytes {
+			if !s.evictUntilFitsLocked(key, projected) {
+				return ErrMemoryLimitExceeded
+			}
+			projected = s.memoryBytes - oldSize + size
+		}
 	}
 
 	var element *list.Element
@@ -94,7 +110,7 @@ func (s *Store) Set(key string, value []byte, ttl time.Duration) error {
 	}
 	element = s.lru.PushFront(key)
 	s.items[key] = storedItem{
-		value:     cloneBytes(value),
+		value:     value,
 		expiresAt: expiresAt(now, ttl),
 		size:      size,
 		element:   element,

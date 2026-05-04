@@ -6,24 +6,22 @@ import (
 	"time"
 )
 
-func TestStoreCopiesValuesAcrossSetAndGet(t *testing.T) {
+func TestStoreInsulatesGetCallersFromEachOther(t *testing.T) {
+	// Set takes ownership of the caller's bytes (callers must not mutate
+	// after Set returns). Get returns a fresh copy each time, so mutating
+	// the slice returned from one Get must not affect the next.
 	s := New(DefaultConfig())
-	input := []byte("hello")
 
-	if err := s.Set("greeting", input, 0); err != nil {
+	if err := s.Set("greeting", []byte("hello"), 0); err != nil {
 		t.Fatalf("set greeting: %v", err)
 	}
-	input[0] = 'j'
 
 	got, ok := s.Get("greeting")
 	if !ok {
 		t.Fatal("expected stored key to be found")
 	}
-	if string(got.Value) != "hello" {
-		t.Fatalf("stored value changed through caller slice: %q", got.Value)
-	}
-
 	got.Value[0] = 'y'
+
 	again, ok := s.Get("greeting")
 	if !ok {
 		t.Fatal("expected stored key to still be found")
