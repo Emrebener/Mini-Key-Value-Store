@@ -1,7 +1,6 @@
 package store
 
 import (
-	"container/list"
 	"math"
 	"strconv"
 	"sync"
@@ -19,8 +18,8 @@ import (
 // reason for sharding in the first place.
 type shard struct {
 	mu                sync.Mutex
-	items             map[string]storedItem
-	lru               *list.List
+	items             map[string]*storedItem
+	lru               lruList
 	memoryBytes       int
 	ttlCount          int
 	maxValueBytes     int
@@ -31,8 +30,7 @@ type shard struct {
 
 func newShard(cfg Config, perShardMemory int) *shard {
 	return &shard{
-		items:             make(map[string]storedItem),
-		lru:               list.New(),
+		items:             make(map[string]*storedItem),
 		maxValueBytes:     cfg.MaxValueBytes,
 		maxMemoryBytes:    perShardMemory,
 		itemOverheadBytes: cfg.ItemOverheadBytes,
@@ -52,7 +50,7 @@ func (sh *shard) set(key string, value []byte, ttl time.Duration) error {
 	oldSize := 0
 	if old, ok := sh.items[key]; ok {
 		if old.expired(now) {
-			sh.deleteLocked(key, old)
+			sh.deleteLocked(old)
 		} else {
 			oldSize = old.size
 		}
@@ -80,21 +78,33 @@ func (sh *shard) set(key string, value []byte, ttl time.Duration) error {
 		}
 	}
 
-	if old, ok := sh.items[key]; ok {
-		sh.lru.Remove(old.element)
-	}
-	element := sh.lru.PushFront(key)
 	expiry := expiresAt(now, ttl)
-	sh.items[key] = storedItem{
-		value:     value,
-		expiresAt: expiry,
-		size:      size,
-		element:   element,
+	if existing, ok := sh.items[key]; ok {
+		// Reuse the storedItem and refresh recency; no new allocation.
+		hadTTL := !existing.expiresAt.IsZero()
+		existing.value = value
+		existing.expiresAt = expiry
+		existing.size = size
+		sh.lru.moveToFront(existing)
+		if hadTTL && expiry.IsZero() {
+			sh.ttlCount--
+		} else if !hadTTL && !expiry.IsZero() {
+			sh.ttlCount++
+		}
+	} else {
+		item := &storedItem{
+			key:       key,
+			value:     value,
+			expiresAt: expiry,
+			size:      size,
+		}
+		sh.items[key] = item
+		sh.lru.pushFront(item)
+		if !expiry.IsZero() {
+			sh.ttlCount++
+		}
 	}
 	sh.memoryBytes = projected
-	if !expiry.IsZero() {
-		sh.ttlCount++
-	}
 	return nil
 }
 
@@ -107,10 +117,10 @@ func (sh *shard) get(key string) (Item, bool) {
 		return Item{}, false
 	}
 	if item.expired(sh.now()) {
-		sh.deleteLocked(key, item)
+		sh.deleteLocked(item)
 		return Item{}, false
 	}
-	sh.lru.MoveToFront(item.element)
+	sh.lru.moveToFront(item)
 	return Item{Value: cloneBytes(item.value)}, true
 }
 
@@ -123,10 +133,10 @@ func (sh *shard) delete(key string) bool {
 		return false
 	}
 	if item.expired(sh.now()) {
-		sh.deleteLocked(key, item)
+		sh.deleteLocked(item)
 		return false
 	}
-	sh.deleteLocked(key, item)
+	sh.deleteLocked(item)
 	return true
 }
 
@@ -140,7 +150,7 @@ func (sh *shard) incr(key string, delta uint64) (uint64, error) {
 	}
 	now := sh.now()
 	if item.expired(now) {
-		sh.deleteLocked(key, item)
+		sh.deleteLocked(item)
 		return 0, ErrNotFound
 	}
 	if !isDecimal(item.value) {
@@ -180,14 +190,9 @@ func (sh *shard) incr(key string, delta uint64) (uint64, error) {
 		projected = sh.memoryBytes - item.size + nextSize
 	}
 
-	expiry := item.expiresAt
-	sh.items[key] = storedItem{
-		value:     nextValue,
-		expiresAt: expiry,
-		size:      nextSize,
-		element:   item.element,
-	}
-	sh.lru.MoveToFront(item.element)
+	item.value = nextValue
+	item.size = nextSize
+	sh.lru.moveToFront(item)
 	sh.memoryBytes = projected
 	return next, nil
 }
@@ -198,9 +203,9 @@ func (sh *shard) cleanupExpired() int {
 
 	now := sh.now()
 	removed := 0
-	for key, item := range sh.items {
+	for _, item := range sh.items {
 		if item.expired(now) {
-			sh.deleteLocked(key, item)
+			sh.deleteLocked(item)
 			removed++
 		}
 	}
@@ -214,34 +219,33 @@ func (sh *shard) memoryBytesSnapshot() int {
 }
 
 func (sh *shard) removeExpiredLocked(now time.Time) {
-	for key, item := range sh.items {
+	for _, item := range sh.items {
 		if item.expired(now) {
-			sh.deleteLocked(key, item)
+			sh.deleteLocked(item)
 		}
 	}
 }
 
 func (sh *shard) evictUntilFitsLocked(protectedKey string, projected int) bool {
 	for projected > sh.maxMemoryBytes {
-		element := sh.lru.Back()
-		for element != nil && element.Value.(string) == protectedKey {
-			element = element.Prev()
+		candidate := sh.lru.back()
+		for candidate != nil && candidate.key == protectedKey {
+			candidate = candidate.prev
 		}
-		if element == nil {
+		if candidate == nil {
 			return false
 		}
 
-		key := element.Value.(string)
-		item := sh.items[key]
-		sh.deleteLocked(key, item)
-		projected -= item.size
+		size := candidate.size
+		sh.deleteLocked(candidate)
+		projected -= size
 	}
 	return true
 }
 
-func (sh *shard) deleteLocked(key string, item storedItem) {
-	delete(sh.items, key)
-	sh.lru.Remove(item.element)
+func (sh *shard) deleteLocked(item *storedItem) {
+	delete(sh.items, item.key)
+	sh.lru.remove(item)
 	sh.memoryBytes -= item.size
 	if !item.expiresAt.IsZero() {
 		sh.ttlCount--

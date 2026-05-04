@@ -1,7 +1,6 @@
 package store
 
 import (
-	"container/list"
 	"errors"
 	"time"
 )
@@ -29,10 +28,12 @@ type Item struct {
 }
 
 type storedItem struct {
+	key       string
 	value     []byte
 	expiresAt time.Time
 	size      int
-	element   *list.Element
+	prev      *storedItem
+	next      *storedItem
 }
 
 // Store is a sharded key-value cache. Keys are hashed to one of
