@@ -41,6 +41,7 @@ type Store struct {
 	lru         *list.List
 	config      Config
 	memoryBytes int
+	ttlCount    int
 }
 
 func DefaultConfig() Config {
@@ -90,12 +91,14 @@ func (s *Store) Set(key string, value []byte, ttl time.Duration) error {
 	}
 	projected := s.memoryBytes - oldSize + size
 	if projected > s.config.MaxMemoryBytes {
-		s.removeExpiredLocked(now)
-		oldSize = 0
-		if old, ok := s.items[key]; ok {
-			oldSize = old.size
+		if s.ttlCount > 0 {
+			s.removeExpiredLocked(now)
+			oldSize = 0
+			if old, ok := s.items[key]; ok {
+				oldSize = old.size
+			}
+			projected = s.memoryBytes - oldSize + size
 		}
-		projected = s.memoryBytes - oldSize + size
 		if projected > s.config.MaxMemoryBytes {
 			if !s.evictUntilFitsLocked(key, projected) {
 				return ErrMemoryLimitExceeded
@@ -109,13 +112,17 @@ func (s *Store) Set(key string, value []byte, ttl time.Duration) error {
 		s.lru.Remove(old.element)
 	}
 	element = s.lru.PushFront(key)
+	expiry := expiresAt(now, ttl)
 	s.items[key] = storedItem{
 		value:     value,
-		expiresAt: expiresAt(now, ttl),
+		expiresAt: expiry,
 		size:      size,
 		element:   element,
 	}
 	s.memoryBytes = projected
+	if !expiry.IsZero() {
+		s.ttlCount++
+	}
 	return nil
 }
 
@@ -187,12 +194,14 @@ func (s *Store) Incr(key string, delta uint64) (uint64, error) {
 	}
 	projected := s.memoryBytes - item.size + nextSize
 	if projected > s.config.MaxMemoryBytes {
-		s.removeExpiredLocked(now)
-		item, ok = s.items[key]
-		if !ok {
-			return 0, ErrNotFound
+		if s.ttlCount > 0 {
+			s.removeExpiredLocked(now)
+			item, ok = s.items[key]
+			if !ok {
+				return 0, ErrNotFound
+			}
+			projected = s.memoryBytes - item.size + nextSize
 		}
-		projected = s.memoryBytes - item.size + nextSize
 		if projected > s.config.MaxMemoryBytes && !s.evictUntilFitsLocked(key, projected) {
 			return 0, ErrMemoryLimitExceeded
 		}
@@ -270,6 +279,9 @@ func (s *Store) deleteLocked(key string, item storedItem) {
 	delete(s.items, key)
 	s.lru.Remove(item.element)
 	s.memoryBytes -= item.size
+	if !item.expiresAt.IsZero() {
+		s.ttlCount--
+	}
 }
 
 func normalizeConfig(config Config) Config {
