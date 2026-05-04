@@ -20,31 +20,26 @@ throughput.
 
 ## Performance
 
-The same Compose stack benchmarks MiniKV against Redis and Memcached at vol 1's
-published configuration (5 runs × 1000 keys × 128-byte values), at
-concurrency=1 (sequential, single connection) and concurrency=8 (eight parallel
-client connections). Vol 2 columns are medians of three repeated runs.
+The Compose stack benchmarks MiniKV against Redis and Memcached at 5 runs ×
+1000 keys × 128-byte values, at concurrency=1 (sequential, single connection)
+and concurrency=8 (eight parallel client connections). Numbers are medians of
+three repeated runs.
 
-| service   | workload | vol 1, conc=1 | vol 2, conc=1 | vol 1, conc=8 | vol 2, conc=8 |
-| --------- | -------- | ------------: | ------------: | ------------: | ------------: |
-| minikv    | write    |        16,935 |    **47,921** |        14,378 |   **215,635** |
-| minikv    | read     |        43,622 |        46,716 |       211,245 |       221,014 |
-| redis     | write    |        50,654 |        46,190 |       123,470 |       125,836 |
-| redis     | read     |        51,389 |        46,393 |       115,939 |       135,852 |
-| memcached | write    |        52,027 |        50,268 |       260,140 |       280,133 |
-| memcached | read     |        52,682 |        48,819 |       282,169 |       281,252 |
+| service   | workload | conc=1 | conc=8  |
+| --------- | -------- | -----: | ------: |
+| minikv    | write    | 47,921 | 215,635 |
+| minikv    | read     | 46,716 | 221,014 |
+| redis     | write    | 46,190 | 125,836 |
+| redis     | read     | 46,393 | 135,852 |
+| memcached | write    | 50,268 | 280,133 |
+| memcached | read     | 48,819 | 281,252 |
 
 Numbers are operations per second. Redis and Memcached columns are calibration
-anchors, not a competition target — the goal of vol 2 was *measurable*
-improvement against vol 1's baseline, not parity with production caches. The
-concurrency=8 column carries the more interesting story: vol 1 MiniKV writes
-*regress* under contention (14k vs 17k single-connection) because of a
-performance bug in the write path; vol 2 scales them by ~15× and now sits
-ahead of Redis at the same concurrency. The vol 1 → vol 2 deltas are the
-journey covered in [the Reinventing the Wheel
-series](https://emrebener.com/topics/reinventing-the-wheel-series/); the
-[Benchmark comparison](#benchmark-comparison) section below covers how to
-reproduce the numbers.
+anchors, not a competition target — MiniKV is a learning project, not a
+production peer. The journey to these numbers is covered in [the Reinventing
+the Wheel series](https://emrebener.com/topics/reinventing-the-wheel-series/);
+the [Benchmark comparison](#benchmark-comparison) section below covers how to
+reproduce them.
 
 ## Getting started
 
