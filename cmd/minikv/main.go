@@ -22,6 +22,7 @@ import (
 type config struct {
 	addr              string
 	pprofAddr         string
+	shards            int
 	maxValueBytes     int
 	maxMemoryBytes    int
 	itemOverheadBytes int
@@ -41,6 +42,7 @@ func main() {
 func loadConfig() config {
 	addr := flag.String("addr", "0.0.0.0:11211", "TCP address to listen on")
 	pprofAddr := flag.String("pprof-addr", "", "HTTP address for net/http/pprof handlers; empty disables")
+	shards := flag.Int("shards", store.DefaultConfig().Shards, "number of independently-locked shards in the store")
 	maxValueBytes := flag.Int("max-value-bytes", store.DefaultConfig().MaxValueBytes, "maximum bytes allowed in one value")
 	maxMemoryBytes := flag.Int("max-memory-bytes", store.DefaultConfig().MaxMemoryBytes, "maximum accounted key/value bytes before eviction")
 	itemOverheadBytes := flag.Int("item-overhead-bytes", store.DefaultConfig().ItemOverheadBytes, "explicit per-item bytes included in memory accounting")
@@ -49,6 +51,7 @@ func loadConfig() config {
 	return config{
 		addr:              *addr,
 		pprofAddr:         *pprofAddr,
+		shards:            *shards,
 		maxValueBytes:     *maxValueBytes,
 		maxMemoryBytes:    *maxMemoryBytes,
 		itemOverheadBytes: *itemOverheadBytes,
@@ -76,6 +79,7 @@ func run(parent context.Context, cfg config, logger *slog.Logger) error {
 		MaxValueBytes:     cfg.maxValueBytes,
 		MaxMemoryBytes:    cfg.maxMemoryBytes,
 		ItemOverheadBytes: cfg.itemOverheadBytes,
+		Shards:            cfg.shards,
 	})
 	var wg sync.WaitGroup
 	go func() {
@@ -123,6 +127,9 @@ func validateConfig(cfg config) error {
 	}
 	if cfg.cleanupInterval < 0 {
 		return fmt.Errorf("cleanup-interval must be non-negative")
+	}
+	if cfg.shards <= 0 {
+		return fmt.Errorf("shards must be positive")
 	}
 	return nil
 }
