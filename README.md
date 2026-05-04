@@ -69,19 +69,23 @@ All knobs are command-line flags on `cmd/minikv`:
 ```sh
 go run ./cmd/minikv \
   -addr 127.0.0.1:11211 \
+  -shards 16 \
   -max-value-bytes 1048576 \
   -max-memory-bytes 67108864 \
   -item-overhead-bytes 64 \
-  -cleanup-interval 1m
+  -cleanup-interval 1m \
+  -pprof-addr ""
 ```
 
 | Flag | What it controls |
 | --- | --- |
 | `-addr` | Listen address. Defaults to `0.0.0.0:11211` so the same binary works inside containers; pass a loopback address for local-only use. |
+| `-shards` | Number of independently-locked shards over the keyspace. Each shard owns its own LRU and an equal slice of the memory budget. Defaults to 16. |
 | `-max-value-bytes` | Per-value byte cap. Larger values get rejected with `SERVER_ERROR value too large`. |
-| `-max-memory-bytes` | Total memory budget. When a write would exceed it, the store first removes expired items, then evicts least-recently-used live items until the write fits. |
+| `-max-memory-bytes` | Total memory budget across all shards. When a write would exceed its shard's slice, the shard first removes expired items, then evicts least-recently-used live items until the write fits. |
 | `-item-overhead-bytes` | Per-item bookkeeping bytes added to `len(key) + len(value)`. Memory accounting is intentionally explicit rather than pretending to match Go's runtime/map overhead exactly. |
 | `-cleanup-interval` | How often the background sweeper removes expired keys. Expired keys are also cleaned lazily on access. |
+| `-pprof-addr` | HTTP address for `net/http/pprof` handlers. Empty (the default) disables; set to e.g. `0.0.0.0:6060` to enable for benchmarking and debugging. |
 
 The same commands are available through `make`:
 
@@ -145,8 +149,14 @@ docker compose run --rm bench \
   -runs 10 \
   -keys 5000 \
   -value-bytes 256 \
+  -concurrency 8 \
   -services minikv,redis,memcached
 ```
+
+`-concurrency N` dials N client connections per service and partitions each
+run's keyspace across them, with a barrier between the write and read phases
+per run. The default is 1, which reproduces the original single-connection
+benchmark.
 
 ## Protocol
 
