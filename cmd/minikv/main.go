@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"sync"
@@ -19,6 +21,7 @@ import (
 
 type config struct {
 	addr              string
+	pprofAddr         string
 	maxValueBytes     int
 	maxMemoryBytes    int
 	itemOverheadBytes int
@@ -37,6 +40,7 @@ func main() {
 
 func loadConfig() config {
 	addr := flag.String("addr", "0.0.0.0:11211", "TCP address to listen on")
+	pprofAddr := flag.String("pprof-addr", "", "HTTP address for net/http/pprof handlers; empty disables")
 	maxValueBytes := flag.Int("max-value-bytes", store.DefaultConfig().MaxValueBytes, "maximum bytes allowed in one value")
 	maxMemoryBytes := flag.Int("max-memory-bytes", store.DefaultConfig().MaxMemoryBytes, "maximum accounted key/value bytes before eviction")
 	itemOverheadBytes := flag.Int("item-overhead-bytes", store.DefaultConfig().ItemOverheadBytes, "explicit per-item bytes included in memory accounting")
@@ -44,6 +48,7 @@ func loadConfig() config {
 	flag.Parse()
 	return config{
 		addr:              *addr,
+		pprofAddr:         *pprofAddr,
 		maxValueBytes:     *maxValueBytes,
 		maxMemoryBytes:    *maxMemoryBytes,
 		itemOverheadBytes: *itemOverheadBytes,
@@ -78,6 +83,10 @@ func run(parent context.Context, cfg config, logger *slog.Logger) error {
 		_ = listener.Close()
 	}()
 	go cleanupExpired(ctx, store, cfg.cleanupInterval, logger)
+
+	if cfg.pprofAddr != "" {
+		go servePprof(ctx, cfg.pprofAddr, logger)
+	}
 
 	for {
 		conn, err := listener.Accept()
@@ -116,6 +125,20 @@ func validateConfig(cfg config) error {
 		return fmt.Errorf("cleanup-interval must be non-negative")
 	}
 	return nil
+}
+
+func servePprof(ctx context.Context, addr string, logger *slog.Logger) {
+	server := &http.Server{Addr: addr}
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdown)
+	}()
+	logger.Info("pprof listening", "addr", addr)
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Warn("pprof server stopped", "error", err)
+	}
 }
 
 func cleanupExpired(ctx context.Context, store *store.Store, interval time.Duration, logger *slog.Logger) {
