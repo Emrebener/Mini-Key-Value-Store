@@ -2,13 +2,8 @@ services:
   minikv:
     build: .
     image: mini-kv-store:latest
-    command:
-      - -addr
-      - 0.0.0.0:11211
-      - -pprof-addr
-      - 0.0.0.0:6060
-      - -max-memory-bytes
-      - "67108864"
+    volumes:
+      - ./docker/minikv.bench.conf:/minikv.conf:ro
     ports:
       - "11211:11211"
       - "16060:6060"

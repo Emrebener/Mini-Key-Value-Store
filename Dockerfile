@@ -13,6 +13,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/minikv 
 FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=build /out/minikv /minikv
+COPY --from=build /src/minikv.conf /minikv.conf
 
 EXPOSE 11211
 

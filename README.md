@@ -53,10 +53,12 @@ docker run --rm -p 11211:11211 mini-kv-store
 Or, if you have Go 1.22+:
 
 ```sh
-go run ./cmd/minikv -addr 127.0.0.1:11211
+go run ./cmd/minikv
 ```
 
-You should see the server log the bound address. In another terminal, talk to
+The binary reads `./minikv.conf` (a sample is shipped at the repo root); pass
+`-config <path>` to point it at a different file. You should see the server log
+the bound address. In another terminal, talk to
 it with `nc`:
 
 ```sh
@@ -84,9 +86,9 @@ response. The [Protocol](#protocol) section below lists every command.
   covers the profiler-driven optimization journey behind the numbers in the
   Performance section above.
 - **Run the tests:** `go test ./...` (or `make test`).
-- **Tune the cache** with the flags in [Configuration](#configuration).
+- **Tune the cache** by editing the keys in [Configuration](#configuration).
 - **Compare it to Redis and Memcached** with the [benchmark stack](#benchmark-comparison).
-- **Profile it** by passing `-pprof-addr 127.0.0.1:6060` to `cmd/minikv` and
+- **Profile it** by setting `pprof-addr = 127.0.0.1:6060` in `minikv.conf` and
   scraping `http://127.0.0.1:6060/debug/pprof/` with `go tool pprof`. The
   Compose stack publishes the same endpoint on host port `16060`.
 - **Read the source.** The layout mirrors the design: `internal/protocol`
@@ -96,34 +98,40 @@ response. The [Protocol](#protocol) section below lists every command.
 
 ## Configuration
 
-All knobs are command-line flags on `cmd/minikv`:
+The binary reads a single key=value file. By default it looks for
+`./minikv.conf` in the current directory; pass `-config <path>` to override.
+Lines beginning with `#` are comments. Any key may be omitted to use its
+default. The repository ships a sample `minikv.conf` at the root with every
+key set to its default value:
 
-```sh
-go run ./cmd/minikv \
-  -addr 127.0.0.1:11211 \
-  -shards 16 \
-  -max-value-bytes 1048576 \
-  -max-memory-bytes 67108864 \
-  -item-overhead-bytes 64 \
-  -cleanup-interval 1m \
-  -pprof-addr ""
+```ini
+addr                = 0.0.0.0:11211
+pprof-addr          =
+shards              = 16
+max-value-bytes     = 1048576
+max-memory-bytes    = 67108864
+item-overhead-bytes = 64
+cleanup-interval    = 1m
 ```
 
-| Flag | What it controls |
+| Key | What it controls |
 | --- | --- |
-| `-addr` | Listen address. Defaults to `0.0.0.0:11211` so the same binary works inside containers; pass a loopback address for local-only use. |
-| `-shards` | Number of independently-locked shards over the keyspace. Each shard owns its own LRU and an equal slice of the memory budget. Defaults to 16. |
-| `-max-value-bytes` | Per-value byte cap. Larger values get rejected with `SERVER_ERROR value too large`. |
-| `-max-memory-bytes` | Total memory budget across all shards. When a write would exceed its shard's slice, the shard first removes expired items, then evicts least-recently-used live items until the write fits. |
-| `-item-overhead-bytes` | Per-item bookkeeping bytes added to `len(key) + len(value)`. Memory accounting is intentionally explicit rather than pretending to match Go's runtime/map overhead exactly. |
-| `-cleanup-interval` | How often the background sweeper removes expired keys. Expired keys are also cleaned lazily on access. |
-| `-pprof-addr` | HTTP address for `net/http/pprof` handlers. Empty (the default) disables; set to e.g. `0.0.0.0:6060` to enable for benchmarking and debugging. |
+| `addr` | Listen address. Defaults to `0.0.0.0:11211` so the same binary works inside containers; use a loopback address for local-only use. |
+| `shards` | Number of independently-locked shards over the keyspace. Each shard owns its own LRU and an equal slice of the memory budget. |
+| `max-value-bytes` | Per-value byte cap. Larger values get rejected with `SERVER_ERROR value too large`. |
+| `max-memory-bytes` | Total memory budget across all shards. When a write would exceed its shard's slice, the shard first removes expired items, then evicts least-recently-used live items until the write fits. |
+| `item-overhead-bytes` | Per-item bookkeeping bytes added to `len(key) + len(value)`. Memory accounting is intentionally explicit rather than pretending to match Go's runtime/map overhead exactly. |
+| `cleanup-interval` | How often the background sweeper removes expired keys. `0s` disables. Expired keys are also cleaned lazily on access. |
+| `pprof-addr` | HTTP address for `net/http/pprof` handlers. Empty (the default) disables; set to e.g. `0.0.0.0:6060` to enable for benchmarking and debugging. |
 
-The same commands are available through `make`:
+Unknown keys, malformed lines, and out-of-range numeric values are rejected at
+startup with an error that names the file and line number.
+
+A `Makefile` wraps the most common entry points:
 
 ```sh
 make test
-make run ADDR=127.0.0.1:11211
+make run                          # ./cmd/minikv with the bundled minikv.conf
 ```
 
 ## Docker
@@ -140,12 +148,13 @@ Run it:
 docker run --rm -p 11211:11211 mini-kv-store
 ```
 
-Override flags the same way you would locally:
+The image bakes the bundled `minikv.conf` in at `/minikv.conf`. Mount your own
+to override:
 
 ```sh
-docker run --rm -p 11211:11211 mini-kv-store \
-  -addr 0.0.0.0:11211 \
-  -max-memory-bytes 67108864
+docker run --rm -p 11211:11211 \
+  -v $(pwd)/minikv.conf:/minikv.conf:ro \
+  mini-kv-store
 ```
 
 ## Benchmark comparison

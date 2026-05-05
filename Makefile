@@ -1,6 +1,6 @@
 BINARY := minikv
 IMAGE := mini-kv-store
-ADDR ?= 0.0.0.0:11211
+CONFIG ?= minikv.conf
 BENCH_ARGS ?=
 
 .PHONY: fmt test run build docker-build docker-run bench-stack-up bench-stack-down bench
@@ -12,7 +12,7 @@ test:
 	go test ./...
 
 run:
-	go run ./cmd/minikv -addr $(ADDR)
+	go run ./cmd/minikv -config $(CONFIG)
 
 build:
 	go build -o bin/$(BINARY) ./cmd/minikv
