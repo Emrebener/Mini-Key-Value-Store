@@ -22,15 +22,20 @@ const (
 	OpIncr
 	OpPing
 	OpAuth
+	OpMget
+	OpGets
+	OpCas
 )
 
 type Command struct {
 	Op         Op
 	Key        string
+	Keys       []string // populated for OpMget and OpGets
 	Value      []byte
 	TTLSeconds uint64
 	Delta      uint64
 	Token      string
+	CAS        uint64 // populated for OpCas
 }
 
 type Parser struct {
@@ -115,9 +120,74 @@ func (p *Parser) ReadCommand() (Command, error) {
 			return Command{}, err
 		}
 		return Command{Op: OpIncr, Key: fields[1], Delta: delta}, nil
+	case "mget":
+		keys, err := keysFromFields(fields[1:])
+		if err != nil {
+			return Command{}, err
+		}
+		return Command{Op: OpMget, Keys: keys}, nil
+	case "gets":
+		keys, err := keysFromFields(fields[1:])
+		if err != nil {
+			return Command{}, err
+		}
+		return Command{Op: OpGets, Keys: keys}, nil
+	case "cas":
+		// cas <key> [<ttl-seconds>] <cas-version> <bytes>\r\n<value>\r\n
+		if len(fields) != 4 && len(fields) != 5 || !validKey(fields[1]) {
+			return Command{}, protocolError("usage: cas <key> [<ttl-seconds>] <cas-version> <bytes>")
+		}
+		ttlSeconds := uint64(0)
+		var versionToken, sizeToken string
+		if len(fields) == 4 {
+			versionToken = fields[2]
+			sizeToken = fields[3]
+		} else {
+			ttl, err := parseUintToken(fields[2], "TTL")
+			if err != nil {
+				return Command{}, err
+			}
+			ttlSeconds = ttl
+			versionToken = fields[3]
+			sizeToken = fields[4]
+		}
+		version, err := parseUintToken(versionToken, "cas-version")
+		if err != nil {
+			return Command{}, err
+		}
+		size, err := parseByteCount(sizeToken)
+		if err != nil {
+			return Command{}, err
+		}
+		value := make([]byte, size+2)
+		if _, err := io.ReadFull(p.reader, value); err != nil {
+			return Command{}, protocolError("incomplete value")
+		}
+		if value[size] != '\r' || value[size+1] != '\n' {
+			return Command{}, protocolError("value must end with CRLF")
+		}
+		return Command{
+			Op:         OpCas,
+			Key:        fields[1],
+			Value:      value[:size],
+			TTLSeconds: ttlSeconds,
+			CAS:        version,
+		}, nil
 	default:
 		return Command{}, protocolError("unknown command")
 	}
+}
+
+func keysFromFields(fields []string) ([]string, error) {
+	if len(fields) == 0 {
+		return nil, protocolError("at least one key is required")
+	}
+	for _, key := range fields {
+		if !validKey(key) {
+			return nil, protocolError("invalid key")
+		}
+	}
+	return fields, nil
 }
 
 // readLineSlice reads through the next '\n' and returns a slice into the

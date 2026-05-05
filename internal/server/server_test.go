@@ -92,3 +92,45 @@ func TestAuthCommandRejectedWhenAuthNotConfigured(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+func TestMgetReturnsHitsAndSkipsMisses(t *testing.T) {
+	s := New(store.New(store.DefaultConfig()))
+	got := serveAll(t, s,
+		"set a 1\r\nA\r\nset c 1\r\nC\r\nmget a b c\r\n")
+	want := "STORED\r\nSTORED\r\nVALUE a 1\r\nA\r\nVALUE c 1\r\nC\r\nEND"
+	if got != want {
+		t.Fatalf("got:\n%s\n\nwant:\n%s", got, want)
+	}
+}
+
+func TestGetsIncludesCASToken(t *testing.T) {
+	s := New(store.New(store.DefaultConfig()))
+	got := serveAll(t, s,
+		"set k 1\r\nv\r\ngets k\r\n")
+	// CAS is token-1 since set is the first mutation in the store.
+	want := "STORED\r\nVALUE k 1 1\r\nv\r\nEND"
+	if got != want {
+		t.Fatalf("got:\n%s\n\nwant:\n%s", got, want)
+	}
+}
+
+func TestCasRequiresMatchingVersion(t *testing.T) {
+	s := New(store.New(store.DefaultConfig()))
+	got := serveAll(t, s,
+		"set k 1\r\nv\r\ncas k 999 1\r\nx\r\ngets k\r\ncas k 1 1\r\ny\r\ngets k\r\n")
+	// First cas tries version 999 → EXISTS (mismatch); gets returns version 1.
+	// Second cas uses version 1 (correct) → STORED, bumps to 2.
+	want := "STORED\r\nEXISTS\r\nVALUE k 1 1\r\nv\r\nEND\r\nSTORED\r\nVALUE k 1 2\r\ny\r\nEND"
+	if got != want {
+		t.Fatalf("got:\n%s\n\nwant:\n%s", got, want)
+	}
+}
+
+func TestCasOnMissingKeyReturnsNotFound(t *testing.T) {
+	s := New(store.New(store.DefaultConfig()))
+	got := serveAll(t, s, "cas k 1 1\r\nv\r\n")
+	want := "NOT_FOUND"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}

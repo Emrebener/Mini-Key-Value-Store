@@ -4,6 +4,7 @@ import (
 	"math"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,15 +27,17 @@ type shard struct {
 	maxMemoryBytes    int
 	itemOverheadBytes int
 	now               func() time.Time
+	casCounter        *atomic.Uint64
 }
 
-func newShard(cfg Config, perShardMemory int) *shard {
+func newShard(cfg Config, perShardMemory int, cas *atomic.Uint64) *shard {
 	return &shard{
 		items:             make(map[string]*storedItem),
 		maxValueBytes:     cfg.MaxValueBytes,
 		maxMemoryBytes:    perShardMemory,
 		itemOverheadBytes: cfg.ItemOverheadBytes,
 		now:               cfg.Now,
+		casCounter:        cas,
 	}
 }
 
@@ -79,12 +82,14 @@ func (sh *shard) set(key string, value []byte, ttl time.Duration) error {
 	}
 
 	expiry := expiresAt(now, ttl)
+	newCAS := sh.casCounter.Add(1)
 	if existing, ok := sh.items[key]; ok {
 		// Reuse the storedItem and refresh recency; no new allocation.
 		hadTTL := !existing.expiresAt.IsZero()
 		existing.value = value
 		existing.expiresAt = expiry
 		existing.size = size
+		existing.cas = newCAS
 		sh.lru.moveToFront(existing)
 		if hadTTL && expiry.IsZero() {
 			sh.ttlCount--
@@ -97,6 +102,7 @@ func (sh *shard) set(key string, value []byte, ttl time.Duration) error {
 			value:     value,
 			expiresAt: expiry,
 			size:      size,
+			cas:       newCAS,
 		}
 		sh.items[key] = item
 		sh.lru.pushFront(item)
@@ -121,7 +127,66 @@ func (sh *shard) get(key string) (Item, bool) {
 		return Item{}, false
 	}
 	sh.lru.moveToFront(item)
-	return Item{Value: cloneBytes(item.value)}, true
+	return Item{Value: cloneBytes(item.value), CAS: item.cas}, true
+}
+
+func (sh *shard) cas(key string, value []byte, ttl time.Duration, expected uint64) error {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	if len(value) > sh.maxValueBytes {
+		return ErrValueTooLarge
+	}
+
+	now := sh.now()
+	existing, ok := sh.items[key]
+	if !ok {
+		return ErrNotFound
+	}
+	if existing.expired(now) {
+		sh.deleteLocked(existing)
+		return ErrNotFound
+	}
+	if existing.cas != expected {
+		return ErrCasMismatch
+	}
+
+	size := sh.itemSize(key, len(value))
+	if size > sh.maxMemoryBytes {
+		return ErrMemoryLimitExceeded
+	}
+	projected := sh.memoryBytes - existing.size + size
+	if projected > sh.maxMemoryBytes {
+		if sh.ttlCount > 0 {
+			sh.removeExpiredLocked(now)
+			existing, ok = sh.items[key]
+			if !ok {
+				return ErrNotFound
+			}
+			projected = sh.memoryBytes - existing.size + size
+		}
+		if projected > sh.maxMemoryBytes {
+			if !sh.evictUntilFitsLocked(key, projected) {
+				return ErrMemoryLimitExceeded
+			}
+			projected = sh.memoryBytes - existing.size + size
+		}
+	}
+
+	expiry := expiresAt(now, ttl)
+	hadTTL := !existing.expiresAt.IsZero()
+	existing.value = value
+	existing.expiresAt = expiry
+	existing.size = size
+	existing.cas = sh.casCounter.Add(1)
+	sh.lru.moveToFront(existing)
+	if hadTTL && expiry.IsZero() {
+		sh.ttlCount--
+	} else if !hadTTL && !expiry.IsZero() {
+		sh.ttlCount++
+	}
+	sh.memoryBytes = projected
+	return nil
 }
 
 func (sh *shard) delete(key string) bool {
@@ -192,6 +257,7 @@ func (sh *shard) incr(key string, delta uint64) (uint64, error) {
 
 	item.value = nextValue
 	item.size = nextSize
+	item.cas = sh.casCounter.Add(1)
 	sh.lru.moveToFront(item)
 	sh.memoryBytes = projected
 	return next, nil

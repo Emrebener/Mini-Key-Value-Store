@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"sync/atomic"
 	"time"
 )
 
@@ -11,6 +12,7 @@ var (
 	ErrOverflow            = errors.New("increment would overflow uint64")
 	ErrValueTooLarge       = errors.New("value too large")
 	ErrMemoryLimitExceeded = errors.New("memory limit exceeded")
+	ErrCasMismatch         = errors.New("cas version does not match")
 )
 
 const DefaultShards = 16
@@ -25,6 +27,11 @@ type Config struct {
 
 type Item struct {
 	Value []byte
+	// CAS is a monotonic per-store version stamped on every successful
+	// mutation. Pass it to Cas to perform an optimistic-concurrency
+	// write that only succeeds when the value hasn't changed since the
+	// caller observed it.
+	CAS uint64
 }
 
 type storedItem struct {
@@ -32,6 +39,7 @@ type storedItem struct {
 	value     []byte
 	expiresAt time.Time
 	size      int
+	cas       uint64
 	prev      *storedItem
 	next      *storedItem
 }
@@ -39,8 +47,14 @@ type storedItem struct {
 // Store is a sharded key-value cache. Keys are hashed to one of
 // config.Shards independently-locked shards; each shard owns its own
 // LRU and memory budget. Public methods are concurrency-safe.
+//
+// The cas counter is process-global and monotonic. Each successful
+// mutation (Set, Incr, Cas) increments it atomically and stamps the
+// resulting value with the new version. Tokens are unique across all
+// keys and the lifetime of the process.
 type Store struct {
 	shards []*shard
+	cas    atomic.Uint64
 }
 
 func DefaultConfig() Config {
@@ -59,11 +73,12 @@ func New(config Config) *Store {
 	if perShardMemory < 1 {
 		perShardMemory = 1
 	}
-	shards := make([]*shard, config.Shards)
-	for i := range shards {
-		shards[i] = newShard(config, perShardMemory)
+	s := &Store{}
+	s.shards = make([]*shard, config.Shards)
+	for i := range s.shards {
+		s.shards[i] = newShard(config, perShardMemory, &s.cas)
 	}
-	return &Store{shards: shards}
+	return s
 }
 
 // Set stores value under key with the given TTL.
@@ -85,6 +100,14 @@ func (s *Store) Delete(key string) bool {
 
 func (s *Store) Incr(key string, delta uint64) (uint64, error) {
 	return s.shardFor(key).incr(key, delta)
+}
+
+// Cas writes value under key only when expected matches the value's
+// current CAS version. Returns ErrNotFound if the key is absent or
+// expired, and ErrCasMismatch if the key exists but its version is
+// different.
+func (s *Store) Cas(key string, value []byte, ttl time.Duration, expected uint64) error {
+	return s.shardFor(key).cas(key, value, ttl, expected)
 }
 
 func (s *Store) CleanupExpired() int {

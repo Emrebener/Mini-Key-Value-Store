@@ -327,3 +327,71 @@ func TestStoreCleanupExpiredRemovesOnlyExpiredItems(t *testing.T) {
 		t.Fatal("expected non-expiring item to remain")
 	}
 }
+
+func TestStoreSetStampsMonotonicCASAcrossWrites(t *testing.T) {
+	s := New(DefaultConfig())
+	if err := s.Set("a", []byte("1"), 0); err != nil {
+		t.Fatalf("set a: %v", err)
+	}
+	if err := s.Set("b", []byte("2"), 0); err != nil {
+		t.Fatalf("set b: %v", err)
+	}
+	if err := s.Set("a", []byte("3"), 0); err != nil {
+		t.Fatalf("rewrite a: %v", err)
+	}
+
+	a, _ := s.Get("a")
+	b, _ := s.Get("b")
+	if a.CAS == 0 || b.CAS == 0 {
+		t.Fatalf("CAS tokens must be non-zero, got a=%d b=%d", a.CAS, b.CAS)
+	}
+	if a.CAS <= b.CAS {
+		t.Errorf("a's third write should produce a higher CAS than b: a=%d b=%d", a.CAS, b.CAS)
+	}
+}
+
+func TestStoreCasReturnsErrNotFoundWhenAbsent(t *testing.T) {
+	s := New(DefaultConfig())
+	err := s.Cas("missing", []byte("v"), 0, 1)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Cas on missing key: got %v, want ErrNotFound", err)
+	}
+}
+
+func TestStoreCasReturnsErrCasMismatchOnWrongVersion(t *testing.T) {
+	s := New(DefaultConfig())
+	if err := s.Set("counter", []byte("1"), 0); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, _ := s.Get("counter")
+
+	err := s.Cas("counter", []byte("2"), 0, got.CAS+999)
+	if !errors.Is(err, ErrCasMismatch) {
+		t.Fatalf("Cas with wrong version: got %v, want ErrCasMismatch", err)
+	}
+
+	again, _ := s.Get("counter")
+	if string(again.Value) != "1" || again.CAS != got.CAS {
+		t.Errorf("Cas mismatch must not mutate: value=%q cas-before=%d cas-after=%d", again.Value, got.CAS, again.CAS)
+	}
+}
+
+func TestStoreCasMatchUpdatesAndBumpsVersion(t *testing.T) {
+	s := New(DefaultConfig())
+	if err := s.Set("counter", []byte("1"), 0); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	first, _ := s.Get("counter")
+
+	if err := s.Cas("counter", []byte("2"), 0, first.CAS); err != nil {
+		t.Fatalf("Cas with right version: %v", err)
+	}
+
+	after, _ := s.Get("counter")
+	if string(after.Value) != "2" {
+		t.Errorf("value not updated: %q", after.Value)
+	}
+	if after.CAS <= first.CAS {
+		t.Errorf("CAS should bump after successful Cas: before=%d after=%d", first.CAS, after.CAS)
+	}
+}

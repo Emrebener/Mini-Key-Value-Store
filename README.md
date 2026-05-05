@@ -303,6 +303,90 @@ Incrementing an expired key returns `NOT_FOUND`. Successful `get`, `set`, and
 `incr` refresh recency for LRU; successful `incr` may evict older keys if the
 rewritten counter needs more accounted bytes.
 
+### `mget`
+
+Multi-key fetch. Missing or expired keys are silently skipped; a single `END`
+terminates the response.
+
+```text
+mget <key1> <key2> ...\r\n
+```
+
+Response:
+
+```text
+VALUE <key> <bytes>\r\n
+<value>\r\n
+... (one block per hit)
+END\r\n
+```
+
+### `gets`
+
+Like `get`, but the response includes the per-value CAS version. Accepts one or
+more keys, same shape as `mget`.
+
+```text
+gets <key1> <key2> ...\r\n
+```
+
+Response:
+
+```text
+VALUE <key> <bytes> <cas>\r\n
+<value>\r\n
+...
+END\r\n
+```
+
+### `cas`
+
+Optimistic-concurrency write. Stores `value` only when the named key's current
+CAS version matches the supplied one. The CAS version is the third token a
+`gets` response carries.
+
+```text
+cas <key> <cas-version> <bytes>\r\n
+<value>\r\n
+```
+
+TTL form:
+
+```text
+cas <key> <ttl-seconds> <cas-version> <bytes>\r\n
+<value>\r\n
+```
+
+Responses:
+
+```text
+STORED\r\n          ← the version matched and the write went through
+EXISTS\r\n          ← the key is present but its version differs
+NOT_FOUND\r\n       ← the key is absent or expired
+SERVER_ERROR value too large\r\n
+SERVER_ERROR memory limit exceeded\r\n
+```
+
+The CAS version is a process-global, monotonically-increasing token stamped on
+every successful `set`, `incr`, or `cas`. Tokens are unique across all keys for
+the lifetime of the process, so a stale token from a key that was deleted and
+recreated will never accidentally match the new value.
+
+### `auth`
+
+Bearer-token authentication. Required as the first command on each connection
+when `auth-token` is set in the config.
+
+```text
+auth <token>\r\n
+```
+
+Responses: `AUTHENTICATED\r\n` (token matches), `CLIENT_ERROR auth failed\r\n`
+(wrong token; connection closes), `CLIENT_ERROR auth required\r\n` (any
+non-AUTH command before authentication; connection closes), or
+`CLIENT_ERROR auth not configured\r\n` (server has no `auth-token`; connection
+closes).
+
 ## Requirements
 
 - Go 1.22 or newer (only if running outside Docker)

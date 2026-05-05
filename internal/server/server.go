@@ -175,6 +175,60 @@ func execute(writer *bufio.Writer, kv *store.Store, command protocol.Command) er
 			return writeLine(writer, "DELETED")
 		}
 		return writeLine(writer, "NOT_FOUND")
+	case protocol.OpMget:
+		for _, key := range command.Keys {
+			item, ok := kv.Get(key)
+			if !ok {
+				continue
+			}
+			if err := writeLine(writer, fmt.Sprintf("VALUE %s %d", key, len(item.Value))); err != nil {
+				return err
+			}
+			if _, err := writer.Write(item.Value); err != nil {
+				return err
+			}
+			if _, err := writer.WriteString("\r\n"); err != nil {
+				return err
+			}
+		}
+		return writeLine(writer, "END")
+	case protocol.OpGets:
+		for _, key := range command.Keys {
+			item, ok := kv.Get(key)
+			if !ok {
+				continue
+			}
+			if err := writeLine(writer, fmt.Sprintf("VALUE %s %d %d", key, len(item.Value), item.CAS)); err != nil {
+				return err
+			}
+			if _, err := writer.Write(item.Value); err != nil {
+				return err
+			}
+			if _, err := writer.WriteString("\r\n"); err != nil {
+				return err
+			}
+		}
+		return writeLine(writer, "END")
+	case protocol.OpCas:
+		if command.TTLSeconds > uint64(math.MaxInt64/int64(time.Second)) {
+			return writeLine(writer, "CLIENT_ERROR TTL is too large")
+		}
+		ttl := time.Duration(command.TTLSeconds) * time.Second
+		err := kv.Cas(command.Key, command.Value, ttl, command.CAS)
+		switch {
+		case err == nil:
+			return writeLine(writer, "STORED")
+		case errors.Is(err, store.ErrCasMismatch):
+			return writeLine(writer, "EXISTS")
+		case errors.Is(err, store.ErrNotFound):
+			return writeLine(writer, "NOT_FOUND")
+		case errors.Is(err, store.ErrValueTooLarge):
+			return writeLine(writer, "SERVER_ERROR value too large")
+		case errors.Is(err, store.ErrMemoryLimitExceeded):
+			return writeLine(writer, "SERVER_ERROR memory limit exceeded")
+		default:
+			return err
+		}
 	case protocol.OpIncr:
 		value, err := kv.Incr(command.Key, command.Delta)
 		switch {
