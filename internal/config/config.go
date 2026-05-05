@@ -33,6 +33,10 @@ type Config struct {
 	TLSCert   string // tls-cert
 	TLSKey    string // tls-key
 	AuthToken string // auth-token
+
+	IdleTimeout     time.Duration // idle-timeout
+	MaxConnections  int           // max-connections
+	ShutdownTimeout time.Duration // shutdown-timeout
 }
 
 // Default returns the configuration MiniKV uses when no value is supplied
@@ -46,6 +50,9 @@ func Default() Config {
 		MaxMemoryBytes:    64 * 1024 * 1024,
 		ItemOverheadBytes: 64,
 		CleanupInterval:   time.Minute,
+		IdleTimeout:       5 * time.Minute,
+		MaxConnections:    1024,
+		ShutdownTimeout:   10 * time.Second,
 	}
 }
 
@@ -113,6 +120,20 @@ func setField(cfg *Config, key, value string) error {
 		cfg.TLSKey = value
 	case "auth-token":
 		cfg.AuthToken = value
+	case "idle-timeout":
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("idle-timeout: %w", err)
+		}
+		cfg.IdleTimeout = d
+	case "max-connections":
+		return parseInt(value, "max-connections", &cfg.MaxConnections)
+	case "shutdown-timeout":
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("shutdown-timeout: %w", err)
+		}
+		cfg.ShutdownTimeout = d
 	default:
 		return fmt.Errorf("unknown key %q", key)
 	}
@@ -149,6 +170,15 @@ func (c Config) validate() error {
 	}
 	if (c.TLSCert == "") != (c.TLSKey == "") {
 		return errors.New("tls-cert and tls-key must be set together")
+	}
+	if c.IdleTimeout < 0 {
+		return errors.New("idle-timeout must be non-negative")
+	}
+	if c.MaxConnections < 0 {
+		return errors.New("max-connections must be non-negative")
+	}
+	if c.ShutdownTimeout < 0 {
+		return errors.New("shutdown-timeout must be non-negative")
 	}
 	return nil
 }

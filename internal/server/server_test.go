@@ -1,9 +1,16 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Emrebener/Mini-Key-Value-Store/internal/store"
 )
@@ -133,6 +140,148 @@ func TestCasOnMissingKeyReturnsNotFound(t *testing.T) {
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
+}
+
+// startTestServer brings the server up on a real localhost listener so
+// tests can exercise the connection-level lifecycle (deadlines, semaphore,
+// shutdown). Returns the dial address and a stop function.
+func startTestServer(t *testing.T, srv *Server) (addr string, stop func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go srv.ServeConn(conn)
+		}
+	}()
+	stop = func() {
+		_ = listener.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+		wg.Wait()
+	}
+	return listener.Addr().String(), stop
+}
+
+func TestMaxConnectionsRejectsBeyondCap(t *testing.T) {
+	srv := New(store.New(store.DefaultConfig())).WithMaxConnections(1)
+	addr, stop := startTestServer(t, srv)
+	defer stop()
+
+	// First connection holds its slot by sending a command and reading the response.
+	first, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial first: %v", err)
+	}
+	defer first.Close()
+	if _, err := io.WriteString(first, "ping\r\n"); err != nil {
+		t.Fatalf("write first: %v", err)
+	}
+	firstResp, err := bufio.NewReader(first).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read first: %v", err)
+	}
+	if !strings.HasPrefix(firstResp, "PONG") {
+		t.Fatalf("first response = %q, want PONG", firstResp)
+	}
+
+	// Second connection should be rejected with SERVER_ERROR and closed.
+	second, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial second: %v", err)
+	}
+	defer second.Close()
+	body, err := io.ReadAll(second)
+	if err != nil {
+		t.Fatalf("read second: %v", err)
+	}
+	if !strings.Contains(string(body), "SERVER_ERROR max connections reached") {
+		t.Errorf("rejection body = %q, want SERVER_ERROR max connections reached", body)
+	}
+}
+
+func TestIdleTimeoutClosesQuietConnection(t *testing.T) {
+	srv := New(store.New(store.DefaultConfig())).WithIdleTimeout(50 * time.Millisecond)
+	addr, stop := startTestServer(t, srv)
+	defer stop()
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Don't send anything. The server should close the connection after the idle timeout.
+	deadline := time.Now().Add(time.Second)
+	_ = conn.SetReadDeadline(deadline)
+	_, err = io.ReadAll(conn)
+	if err != nil && !errors.Is(err, io.EOF) && !strings.Contains(err.Error(), "use of closed") {
+		// io.EOF or a generic close is acceptable; what we don't want is a deadline-on-the-client error.
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			t.Fatalf("client read timed out before server closed; idle timeout not enforced")
+		}
+	}
+}
+
+func TestShutdownCompletesAfterDrainingActiveConnection(t *testing.T) {
+	srv := New(store.New(store.DefaultConfig()))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var acceptWG sync.WaitGroup
+	acceptWG.Add(1)
+	go func() {
+		defer acceptWG.Done()
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go srv.ServeConn(conn)
+		}
+	}()
+
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := io.WriteString(conn, "ping\r\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	resp, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.HasPrefix(resp, "PONG") {
+		t.Fatalf("response = %q", resp)
+	}
+
+	// Connection is now idle on the server. Shutdown should evict it
+	// promptly via the read-deadline mechanism.
+	_ = listener.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Shutdown took %v, want < 1s", elapsed)
+	}
+	acceptWG.Wait()
 }
 
 func TestStatsReportsCommandCountersAndStoreItems(t *testing.T) {

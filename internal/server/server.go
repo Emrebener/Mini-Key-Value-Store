@@ -6,12 +6,14 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,17 +24,24 @@ import (
 // Server holds the dependencies and configuration shared across all client
 // connections handled by this process.
 type Server struct {
-	store     *store.Store
-	authToken string
-	startedAt time.Time
+	store       *store.Store
+	authToken   string
+	idleTimeout time.Duration
+	semaphore   chan struct{}
+	startedAt   time.Time
+
+	connsMu sync.Mutex
+	conns   map[net.Conn]struct{}
+	wg      sync.WaitGroup
 
 	// Operator-facing counters. Bumped from connection goroutines via
 	// atomic ops; sampled by Stats() for STATS / /doctor responses.
-	connectionsOpened atomic.Uint64
-	connectionsActive atomic.Int64
-	authFailures      atomic.Uint64
-	clientErrors      atomic.Uint64
-	serverErrors      atomic.Uint64
+	connectionsOpened   atomic.Uint64
+	connectionsActive   atomic.Int64
+	connectionsRejected atomic.Uint64
+	authFailures        atomic.Uint64
+	clientErrors        atomic.Uint64
+	serverErrors        atomic.Uint64
 
 	cmdGet    atomic.Uint64
 	cmdSet    atomic.Uint64
@@ -47,9 +56,13 @@ type Server struct {
 }
 
 // New constructs a Server bound to kv. Call With* setters before serving to
-// configure connection-level behavior (auth, etc.).
+// configure connection-level behavior (auth, deadlines, max connections).
 func New(kv *store.Store) *Server {
-	return &Server{store: kv, startedAt: time.Now()}
+	return &Server{
+		store:     kv,
+		startedAt: time.Now(),
+		conns:     make(map[net.Conn]struct{}),
+	}
 }
 
 // WithAuthToken enables AUTH-gated connections. When token is empty (the
@@ -60,72 +73,236 @@ func (s *Server) WithAuthToken(token string) *Server {
 	return s
 }
 
+// WithIdleTimeout sets the per-connection read deadline applied before
+// each command. Zero or negative disables the timeout.
+func (s *Server) WithIdleTimeout(d time.Duration) *Server {
+	s.idleTimeout = d
+	return s
+}
+
+// WithMaxConnections caps the number of in-flight connections. Past the
+// cap, new connections receive SERVER_ERROR max connections reached and
+// are closed. Zero or negative disables the cap.
+func (s *Server) WithMaxConnections(n int) *Server {
+	if n > 0 {
+		s.semaphore = make(chan struct{}, n)
+	} else {
+		s.semaphore = nil
+	}
+	return s
+}
+
 // Store returns the backing store. Exposed so callers (e.g. the operations
 // HTTP listener) can sample it without a separate handle.
 func (s *Server) Store() *store.Store { return s.store }
 
 // Stats is a snapshot of operator-facing counters and store stats.
 type Stats struct {
-	StartedAt         time.Time
-	Uptime            time.Duration
-	ConnectionsOpened uint64
-	ConnectionsActive int64
-	AuthFailures      uint64
-	ClientErrors      uint64
-	ServerErrors      uint64
-	CmdGet            uint64
-	CmdSet            uint64
-	CmdDelete         uint64
-	CmdIncr           uint64
-	CmdMget           uint64
-	CmdGets           uint64
-	CmdCas            uint64
-	CmdStats          uint64
-	CmdAuth           uint64
-	CmdPing           uint64
-	Store             store.Stats
+	StartedAt           time.Time
+	Uptime              time.Duration
+	ConnectionsOpened   uint64
+	ConnectionsActive   int64
+	ConnectionsRejected uint64
+	AuthFailures        uint64
+	ClientErrors        uint64
+	ServerErrors        uint64
+	CmdGet              uint64
+	CmdSet              uint64
+	CmdDelete           uint64
+	CmdIncr             uint64
+	CmdMget             uint64
+	CmdGets             uint64
+	CmdCas              uint64
+	CmdStats            uint64
+	CmdAuth             uint64
+	CmdPing             uint64
+	Store               store.Stats
 }
 
 func (s *Server) Stats() Stats {
 	now := time.Now()
 	return Stats{
-		StartedAt:         s.startedAt,
-		Uptime:            now.Sub(s.startedAt),
-		ConnectionsOpened: s.connectionsOpened.Load(),
-		ConnectionsActive: s.connectionsActive.Load(),
-		AuthFailures:      s.authFailures.Load(),
-		ClientErrors:      s.clientErrors.Load(),
-		ServerErrors:      s.serverErrors.Load(),
-		CmdGet:            s.cmdGet.Load(),
-		CmdSet:            s.cmdSet.Load(),
-		CmdDelete:         s.cmdDelete.Load(),
-		CmdIncr:           s.cmdIncr.Load(),
-		CmdMget:           s.cmdMget.Load(),
-		CmdGets:           s.cmdGets.Load(),
-		CmdCas:            s.cmdCas.Load(),
-		CmdStats:          s.cmdStats.Load(),
-		CmdAuth:           s.cmdAuth.Load(),
-		CmdPing:           s.cmdPing.Load(),
-		Store:             s.store.Stats(),
+		StartedAt:           s.startedAt,
+		Uptime:              now.Sub(s.startedAt),
+		ConnectionsOpened:   s.connectionsOpened.Load(),
+		ConnectionsActive:   s.connectionsActive.Load(),
+		ConnectionsRejected: s.connectionsRejected.Load(),
+		AuthFailures:        s.authFailures.Load(),
+		ClientErrors:        s.clientErrors.Load(),
+		ServerErrors:        s.serverErrors.Load(),
+		CmdGet:              s.cmdGet.Load(),
+		CmdSet:              s.cmdSet.Load(),
+		CmdDelete:           s.cmdDelete.Load(),
+		CmdIncr:             s.cmdIncr.Load(),
+		CmdMget:             s.cmdMget.Load(),
+		CmdGets:             s.cmdGets.Load(),
+		CmdCas:              s.cmdCas.Load(),
+		CmdStats:            s.cmdStats.Load(),
+		CmdAuth:             s.cmdAuth.Load(),
+		CmdPing:             s.cmdPing.Load(),
+		Store:               s.store.Stats(),
 	}
 }
 
-// ServeConn owns the lifecycle of a single TCP connection: it reads
-// commands until EOF, an unrecoverable error, or an authentication
-// failure, and then closes the connection.
+// ServeConn owns the lifecycle of a single TCP connection: it tries to
+// reserve a slot in the connection cap, sets read deadlines per command,
+// reads commands until EOF, an unrecoverable error, or shutdown, and
+// then closes the connection.
 func (s *Server) ServeConn(conn net.Conn) error {
-	defer conn.Close()
 	s.connectionsOpened.Add(1)
+
+	if !s.acquireSlot() {
+		s.connectionsRejected.Add(1)
+		_, _ = conn.Write([]byte("SERVER_ERROR max connections reached\r\n"))
+		_ = conn.Close()
+		return nil
+	}
+	defer s.releaseSlot()
+
+	s.wg.Add(1)
+	defer s.wg.Done()
+	s.registerConn(conn)
+	defer s.deregisterConn(conn)
+
 	s.connectionsActive.Add(1)
 	defer s.connectionsActive.Add(-1)
-	return s.Serve(conn, conn)
+	defer conn.Close()
+
+	return s.serveConn(conn)
+}
+
+func (s *Server) acquireSlot() bool {
+	if s.semaphore == nil {
+		return true
+	}
+	select {
+	case s.semaphore <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) releaseSlot() {
+	if s.semaphore == nil {
+		return
+	}
+	<-s.semaphore
+}
+
+func (s *Server) registerConn(conn net.Conn) {
+	s.connsMu.Lock()
+	s.conns[conn] = struct{}{}
+	s.connsMu.Unlock()
+}
+
+func (s *Server) deregisterConn(conn net.Conn) {
+	s.connsMu.Lock()
+	delete(s.conns, conn)
+	s.connsMu.Unlock()
+}
+
+// Shutdown asks every active connection to wind down by setting an
+// immediate read deadline. Connection handlers exit naturally as their
+// in-flight reads fail, draining via the internal WaitGroup. If ctx
+// expires before the wait completes, surviving connections are
+// force-closed and ctx.Err() is returned.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.connsMu.Lock()
+	for c := range s.conns {
+		_ = c.SetReadDeadline(time.Now())
+	}
+	s.connsMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		s.connsMu.Lock()
+		for c := range s.conns {
+			_ = c.Close()
+		}
+		s.connsMu.Unlock()
+		<-done
+		return ctx.Err()
+	}
+}
+
+// serveConn is the connection-aware loop. It applies idle deadlines and
+// dispatches commands. Tests against Serve(input, output) bypass it.
+func (s *Server) serveConn(conn net.Conn) error {
+	parser := protocol.NewParser(bufio.NewReader(conn))
+	writer := bufio.NewWriter(conn)
+	defer writer.Flush()
+
+	authenticated := s.authToken == ""
+
+	for {
+		if s.idleTimeout > 0 {
+			_ = conn.SetReadDeadline(time.Now().Add(s.idleTimeout))
+		}
+		command, err := parser.ReadCommand()
+		if err != nil {
+			return s.handleReadError(writer, err, authenticated)
+		}
+
+		if !authenticated {
+			ok, terminal := s.handleAuthGate(writer, command)
+			if !ok {
+				if err := writer.Flush(); err != nil {
+					return err
+				}
+				if terminal {
+					return nil
+				}
+				continue
+			}
+			authenticated = true
+			if err := writer.Flush(); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if command.Op == protocol.OpAuth {
+			s.cmdAuth.Add(1)
+			if s.authToken == "" {
+				writeLine(writer, "CLIENT_ERROR auth not configured")
+				return writer.Flush()
+			}
+			if !constantTimeEqual(command.Token, s.authToken) {
+				s.authFailures.Add(1)
+				writeLine(writer, "CLIENT_ERROR auth failed")
+				return writer.Flush()
+			}
+			writeLine(writer, "AUTHENTICATED")
+			if err := writer.Flush(); err != nil {
+				return err
+			}
+			continue
+		}
+
+		s.countCommand(command.Op)
+
+		if err := s.execute(writer, command); err != nil {
+			s.serverErrors.Add(1)
+			return err
+		}
+		if err := writer.Flush(); err != nil {
+			return err
+		}
+	}
 }
 
 // Serve reads commands from input, executes them against the store, and
-// writes responses to output. It returns nil on graceful EOF and an error
-// for I/O or protocol failures the caller should log. Authentication
-// failures are written to output as protocol responses, then Serve
-// returns nil so the connection can close cleanly.
+// writes responses to output. Used by tests; production traffic goes
+// through ServeConn instead.
 func (s *Server) Serve(input io.Reader, output io.Writer) error {
 	parser := protocol.NewParser(bufio.NewReader(input))
 	writer := bufio.NewWriter(output)
@@ -190,6 +367,22 @@ func (s *Server) Serve(input io.Reader, output io.Writer) error {
 			return err
 		}
 	}
+}
+
+// handleReadError translates a parser error into the right protocol
+// response and a return value for the connection loop.
+func (s *Server) handleReadError(writer *bufio.Writer, err error, _ bool) error {
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		// Idle timeout or shutdown deadline. Close quietly.
+		return nil
+	}
+	s.clientErrors.Add(1)
+	writeLine(writer, "CLIENT_ERROR bad command")
+	return writer.Flush()
 }
 
 func (s *Server) countCommand(op protocol.Op) {
@@ -366,6 +559,7 @@ func writeStats(writer *bufio.Writer, st Stats) error {
 		{"uptime_seconds", fmt.Sprintf("%d", int64(st.Uptime.Seconds()))},
 		{"connections_opened", fmt.Sprintf("%d", st.ConnectionsOpened)},
 		{"connections_active", fmt.Sprintf("%d", st.ConnectionsActive)},
+		{"connections_rejected", fmt.Sprintf("%d", st.ConnectionsRejected)},
 		{"auth_failures", fmt.Sprintf("%d", st.AuthFailures)},
 		{"client_errors", fmt.Sprintf("%d", st.ClientErrors)},
 		{"server_errors", fmt.Sprintf("%d", st.ServerErrors)},

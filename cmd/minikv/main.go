@@ -12,7 +12,6 @@ import (
 	"net/http/pprof"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -76,36 +75,47 @@ func run(parent context.Context, cfg config.Config, logger *slog.Logger) error {
 		ItemOverheadBytes: cfg.ItemOverheadBytes,
 		Shards:            cfg.Shards,
 	})
-	srv := server.New(kv).WithAuthToken(cfg.AuthToken)
-	var wg sync.WaitGroup
-	go func() {
-		<-ctx.Done()
-		_ = listener.Close()
-	}()
+	srv := server.New(kv).
+		WithAuthToken(cfg.AuthToken).
+		WithIdleTimeout(cfg.IdleTimeout).
+		WithMaxConnections(cfg.MaxConnections)
+
 	go cleanupExpired(ctx, kv, cfg.CleanupInterval, logger)
 
 	if cfg.PprofAddr != "" {
 		go serveOps(ctx, cfg.PprofAddr, srv, logger)
 	}
 
+	go func() {
+		<-ctx.Done()
+		logger.Info("shutdown initiated", "timeout", cfg.ShutdownTimeout)
+		_ = listener.Close()
+	}()
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, net.ErrClosed) {
-				wg.Wait()
-				return nil
+				break
 			}
 			return err
 		}
 
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
 			if err := srv.ServeConn(conn); err != nil {
 				logger.Warn("connection closed with error", "remote", conn.RemoteAddr().String(), "error", err)
 			}
 		}()
 	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("shutdown deadline expired; force-closed connections", "error", err)
+	} else {
+		logger.Info("shutdown clean")
+	}
+	return nil
 }
 
 // listen returns a listener bound per cfg, plus a scheme tag ("tcp" or

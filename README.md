@@ -127,6 +127,9 @@ cleanup-interval    = 1m
 | `pprof-addr` | HTTP address for `net/http/pprof` handlers. Empty (the default) disables; set to e.g. `0.0.0.0:6060` to enable for benchmarking and debugging. |
 | `tls-cert`, `tls-key` | PEM-encoded certificate and private key paths. Set both to wrap the listener in TLS; leave both empty for plain TCP. Setting only one is a configuration error. |
 | `auth-token` | Bearer token required as the first command on each connection (`AUTH <token>\r\n`). Empty (the default) disables authentication. |
+| `idle-timeout` | Per-connection read deadline reset before each command. A connection that goes quiet for longer than this gets closed. `0s` disables. |
+| `max-connections` | Hard cap on concurrent connections. Past the cap, new connections receive `SERVER_ERROR max connections reached` and are closed. `0` disables. |
+| `shutdown-timeout` | Time the server waits for in-flight connections to drain after SIGTERM before force-closing them. |
 
 Unknown keys, malformed lines, and out-of-range numeric values are rejected at
 startup with an error that names the file and line number.
