@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	_ "net/http/pprof"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"sync"
@@ -85,7 +85,7 @@ func run(parent context.Context, cfg config.Config, logger *slog.Logger) error {
 	go cleanupExpired(ctx, kv, cfg.CleanupInterval, logger)
 
 	if cfg.PprofAddr != "" {
-		go servePprof(ctx, cfg.PprofAddr, logger)
+		go serveOps(ctx, cfg.PprofAddr, srv, logger)
 	}
 
 	for {
@@ -127,17 +127,102 @@ func listen(cfg config.Config) (net.Listener, string, error) {
 	return l, "tls", err
 }
 
-func servePprof(ctx context.Context, addr string, logger *slog.Logger) {
-	server := &http.Server{Addr: addr}
+// serveOps runs the HTTP listener that exposes /healthz, /doctor, and the
+// /debug/pprof tree. Routes are explicitly registered on a private mux so
+// the pprof handlers don't leak onto http.DefaultServeMux.
+func serveOps(ctx context.Context, addr string, srv *server.Server, logger *slog.Logger) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", healthzHandler)
+	mux.HandleFunc("/doctor", doctorHandler(srv))
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+	httpSrv := &http.Server{Addr: addr, Handler: mux}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdown)
+		_ = httpSrv.Shutdown(shutdown)
 	}()
-	logger.Info("pprof listening", "addr", addr)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Warn("pprof server stopped", "error", err)
+	logger.Info("ops listening", "addr", addr)
+	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Warn("ops server stopped", "error", err)
+	}
+}
+
+// healthzHandler answers liveness probes. The handler runs at all because
+// the HTTP listener accepted the request, so the answer is unconditionally
+// "ok"; the diagnostic equivalent lives at /doctor.
+func healthzHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok\n"))
+}
+
+// doctorHandler returns 200 with a body listing every check, or 503 if any
+// check tripped. The body is one "name: status reason" line per check, in
+// stable order.
+func doctorHandler(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		st := srv.Stats()
+		failures := []string{}
+		ok := []string{}
+
+		// Memory pressure: warn when accounted bytes are above 95% of the
+		// configured budget.
+		var pressure float64
+		if st.Store.MaxMemoryBytes > 0 {
+			pressure = float64(st.Store.MemoryBytes) / float64(st.Store.MaxMemoryBytes)
+		}
+		if pressure > 0.95 {
+			failures = append(failures, fmt.Sprintf("memory_pressure: high (%.0f%% of budget)", pressure*100))
+		} else {
+			ok = append(ok, fmt.Sprintf("memory_pressure: ok (%.0f%% of budget)", pressure*100))
+		}
+
+		// Shard balance: max-items / min-items ratio. Suppressed at very
+		// small item counts because the ratio is dominated by hash noise.
+		if st.Store.Items >= 100 {
+			minItems, maxItems := st.Store.ItemsPerShard[0], st.Store.ItemsPerShard[0]
+			for _, n := range st.Store.ItemsPerShard {
+				if n < minItems {
+					minItems = n
+				}
+				if n > maxItems {
+					maxItems = n
+				}
+			}
+			if minItems == 0 {
+				minItems = 1
+			}
+			ratio := float64(maxItems) / float64(minItems)
+			if ratio > 4 {
+				failures = append(failures, fmt.Sprintf("shard_balance: imbalanced (max/min ratio %.1fx)", ratio))
+			} else {
+				ok = append(ok, fmt.Sprintf("shard_balance: ok (max/min ratio %.1fx)", ratio))
+			}
+		} else {
+			ok = append(ok, fmt.Sprintf("shard_balance: ok (only %d items, ratio not meaningful)", st.Store.Items))
+		}
+
+		// Uptime is informational, never a failure.
+		ok = append(ok, fmt.Sprintf("uptime: %s", st.Uptime.Round(time.Second)))
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if len(failures) > 0 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			for _, line := range failures {
+				_, _ = w.Write([]byte("FAIL " + line + "\n"))
+			}
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		for _, line := range ok {
+			_, _ = w.Write([]byte("OK   " + line + "\n"))
+		}
 	}
 }
 

@@ -25,6 +25,7 @@ const (
 	OpMget
 	OpGets
 	OpCas
+	OpStats
 )
 
 type Command struct {
@@ -120,6 +121,11 @@ func (p *Parser) ReadCommand() (Command, error) {
 			return Command{}, err
 		}
 		return Command{Op: OpIncr, Key: fields[1], Delta: delta}, nil
+	case "stats":
+		if len(fields) != 1 {
+			return Command{}, protocolError("usage: stats")
+		}
+		return Command{Op: OpStats}, nil
 	case "mget":
 		keys, err := keysFromFields(fields[1:])
 		if err != nil {

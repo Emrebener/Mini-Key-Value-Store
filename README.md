@@ -88,9 +88,11 @@ response. The [Protocol](#protocol) section below lists every command.
 - **Run the tests:** `go test ./...` (or `make test`).
 - **Tune the cache** by editing the keys in [Configuration](#configuration).
 - **Compare it to Redis and Memcached** with the [benchmark stack](#benchmark-comparison).
-- **Profile it** by setting `pprof-addr = 127.0.0.1:6060` in `minikv.conf` and
-  scraping `http://127.0.0.1:6060/debug/pprof/` with `go tool pprof`. The
-  Compose stack publishes the same endpoint on host port `16060`.
+- **Profile it, probe it, or check its health** by setting
+  `pprof-addr = 127.0.0.1:6060` in `minikv.conf`. The same listener serves
+  `/debug/pprof/` (for `go tool pprof`), `/healthz` (liveness), and `/doctor`
+  (diagnostic checks). The Compose stack publishes the listener on host port
+  `16060`.
 - **Read the source.** The layout mirrors the design: `internal/protocol`
   parses commands; `internal/store` owns the sharded map (`store.go`,
   `shard.go`), the intrusive LRU (`lru.go`), and the eviction logic;
@@ -371,6 +373,38 @@ The CAS version is a process-global, monotonically-increasing token stamped on
 every successful `set`, `incr`, or `cas`. Tokens are unique across all keys for
 the lifetime of the process, so a stale token from a key that was deleted and
 recreated will never accidentally match the new value.
+
+### `stats`
+
+Operator-facing counters and store snapshot, in Memcached's `STAT` line shape.
+
+```text
+stats\r\n
+```
+
+Response:
+
+```text
+STAT uptime_seconds 142\r\n
+STAT connections_opened 17\r\n
+STAT connections_active 3\r\n
+STAT cmd_set 2104\r\n
+STAT cmd_get 9876\r\n
+... (one STAT line per counter)
+STAT items 1024\r\n
+STAT memory_bytes 2097152\r\n
+STAT max_memory_bytes 67108864\r\n
+STAT evictions 0\r\n
+STAT expirations 12\r\n
+STAT shards 16\r\n
+END\r\n
+```
+
+The HTTP listener (`pprof-addr`) also exposes `/healthz` (always returns 200
+when the process is up) and `/doctor` (returns 200 with diagnostic lines when
+all internal checks pass, 503 otherwise). `/doctor` currently checks memory
+pressure and per-shard balance; both are intended to surface configuration
+mismatches early rather than to be a full health board.
 
 ### `auth`
 

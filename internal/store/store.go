@@ -126,6 +126,39 @@ func (s *Store) MemoryBytes() int {
 	return total
 }
 
+// Stats is an operator-facing snapshot of store-wide counters. Values are
+// best-effort: each shard is sampled independently, so a snapshot taken
+// during heavy traffic may show counters from slightly different points
+// in time. The numbers are still useful for trend-watching.
+type Stats struct {
+	Items           int      // total live items across all shards
+	MemoryBytes     int      // accounted bytes across all shards
+	MaxMemoryBytes  int      // configured budget across all shards
+	Evictions       uint64
+	Expirations     uint64
+	ItemsPerShard   []int    // one entry per shard, in shard-index order
+	NumShards       int
+}
+
+// Stats samples per-shard counters and returns an aggregated snapshot.
+func (s *Store) Stats() Stats {
+	out := Stats{
+		NumShards:     len(s.shards),
+		ItemsPerShard: make([]int, len(s.shards)),
+	}
+	for i, sh := range s.shards {
+		sh.mu.Lock()
+		out.Items += len(sh.items)
+		out.MemoryBytes += sh.memoryBytes
+		out.MaxMemoryBytes += sh.maxMemoryBytes
+		out.ItemsPerShard[i] = len(sh.items)
+		sh.mu.Unlock()
+		out.Evictions += sh.evictions.Load()
+		out.Expirations += sh.expirations.Load()
+	}
+	return out
+}
+
 func (s *Store) shardFor(key string) *shard {
 	return s.shards[shardIndex(key, len(s.shards))]
 }

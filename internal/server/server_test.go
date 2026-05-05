@@ -134,3 +134,21 @@ func TestCasOnMissingKeyReturnsNotFound(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+func TestStatsReportsCommandCountersAndStoreItems(t *testing.T) {
+	s := New(store.New(store.DefaultConfig()))
+	out := serveAll(t, s, "set a 1\r\nA\r\nset b 1\r\nB\r\nget a\r\nstats\r\n")
+
+	if !strings.Contains(out, "STAT cmd_set 2") {
+		t.Errorf("expected STAT cmd_set 2 in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "STAT cmd_get 1") {
+		t.Errorf("expected STAT cmd_get 1 in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "STAT cmd_stats 1") {
+		t.Errorf("expected STAT cmd_stats 1 in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "STAT items 2") {
+		t.Errorf("expected STAT items 2 in output, got:\n%s", out)
+	}
+}

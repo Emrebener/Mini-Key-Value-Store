@@ -28,6 +28,12 @@ type shard struct {
 	itemOverheadBytes int
 	now               func() time.Time
 	casCounter        *atomic.Uint64
+
+	// evictions and expirations are sampled by Stats() to populate the
+	// operator-facing counters. Bumped under the shard mutex; reading
+	// from outside the mutex is allowed (best-effort snapshot semantics).
+	evictions   atomic.Uint64
+	expirations atomic.Uint64
 }
 
 func newShard(cfg Config, perShardMemory int, cas *atomic.Uint64) *shard {
@@ -275,6 +281,9 @@ func (sh *shard) cleanupExpired() int {
 			removed++
 		}
 	}
+	if removed > 0 {
+		sh.expirations.Add(uint64(removed))
+	}
 	return removed
 }
 
@@ -285,26 +294,39 @@ func (sh *shard) memoryBytesSnapshot() int {
 }
 
 func (sh *shard) removeExpiredLocked(now time.Time) {
+	removed := 0
 	for _, item := range sh.items {
 		if item.expired(now) {
 			sh.deleteLocked(item)
+			removed++
 		}
+	}
+	if removed > 0 {
+		sh.expirations.Add(uint64(removed))
 	}
 }
 
 func (sh *shard) evictUntilFitsLocked(protectedKey string, projected int) bool {
+	evicted := 0
 	for projected > sh.maxMemoryBytes {
 		candidate := sh.lru.back()
 		for candidate != nil && candidate.key == protectedKey {
 			candidate = candidate.prev
 		}
 		if candidate == nil {
+			if evicted > 0 {
+				sh.evictions.Add(uint64(evicted))
+			}
 			return false
 		}
 
 		size := candidate.size
 		sh.deleteLocked(candidate)
 		projected -= size
+		evicted++
+	}
+	if evicted > 0 {
+		sh.evictions.Add(uint64(evicted))
 	}
 	return true
 }
