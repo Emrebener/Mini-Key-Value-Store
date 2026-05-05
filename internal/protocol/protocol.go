@@ -21,6 +21,7 @@ const (
 	OpDelete
 	OpIncr
 	OpPing
+	OpAuth
 )
 
 type Command struct {
@@ -29,6 +30,7 @@ type Command struct {
 	Value      []byte
 	TTLSeconds uint64
 	Delta      uint64
+	Token      string
 }
 
 type Parser struct {
@@ -63,6 +65,11 @@ func (p *Parser) ReadCommand() (Command, error) {
 			return Command{}, protocolError("usage: ping")
 		}
 		return Command{Op: OpPing}, nil
+	case "auth":
+		if len(fields) != 2 || !validToken(fields[1]) {
+			return Command{}, protocolError("usage: auth <token>")
+		}
+		return Command{Op: OpAuth, Token: fields[1]}, nil
 	case "get":
 		if len(fields) != 2 || !validKey(fields[1]) {
 			return Command{}, protocolError("usage: get <key>")
@@ -161,6 +168,13 @@ func validKey(key string) bool {
 		}
 	}
 	return true
+}
+
+// validToken accepts the same character class as keys: any non-control,
+// non-whitespace byte. Tokens are typically random strings produced by the
+// operator's secret manager, so we don't restrict to alphanumeric.
+func validToken(token string) bool {
+	return validKey(token)
 }
 
 func protocolError(message string) error {

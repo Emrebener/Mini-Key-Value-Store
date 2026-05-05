@@ -29,6 +29,10 @@ type Config struct {
 	MaxMemoryBytes    int           // max-memory-bytes
 	ItemOverheadBytes int           // item-overhead-bytes
 	CleanupInterval   time.Duration // cleanup-interval
+
+	TLSCert   string // tls-cert
+	TLSKey    string // tls-key
+	AuthToken string // auth-token
 }
 
 // Default returns the configuration MiniKV uses when no value is supplied
@@ -103,6 +107,12 @@ func setField(cfg *Config, key, value string) error {
 			return fmt.Errorf("cleanup-interval: %w", err)
 		}
 		cfg.CleanupInterval = d
+	case "tls-cert":
+		cfg.TLSCert = value
+	case "tls-key":
+		cfg.TLSKey = value
+	case "auth-token":
+		cfg.AuthToken = value
 	default:
 		return fmt.Errorf("unknown key %q", key)
 	}
@@ -137,5 +147,14 @@ func (c Config) validate() error {
 	if c.Shards <= 0 {
 		return errors.New("shards must be positive")
 	}
+	if (c.TLSCert == "") != (c.TLSKey == "") {
+		return errors.New("tls-cert and tls-key must be set together")
+	}
 	return nil
+}
+
+// TLSEnabled reports whether the configuration carries a certificate/key pair
+// the server should bind a TLS listener with.
+func (c Config) TLSEnabled() bool {
+	return c.TLSCert != "" && c.TLSKey != ""
 }

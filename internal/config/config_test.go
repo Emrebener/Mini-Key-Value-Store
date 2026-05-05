@@ -156,3 +156,43 @@ func TestDefault_validates(t *testing.T) {
 		t.Fatalf("Default() should validate cleanly, got %v", err)
 	}
 }
+
+func TestLoad_tlsKeysMustBeSetTogether(t *testing.T) {
+	cases := []string{
+		"tls-cert = /etc/minikv/server.crt\n",
+		"tls-key = /etc/minikv/server.key\n",
+	}
+	for _, contents := range cases {
+		path := writeTempConfig(t, contents)
+		_, err := Load(path)
+		if err == nil {
+			t.Errorf("expected validation error for %q, got nil", contents)
+			continue
+		}
+		if !strings.Contains(err.Error(), "tls-cert") || !strings.Contains(err.Error(), "tls-key") {
+			t.Errorf("error %q should name both tls keys", err)
+		}
+	}
+}
+
+func TestLoad_tlsKeysSetTogetherEnablesTLS(t *testing.T) {
+	path := writeTempConfig(t, "tls-cert = /etc/minikv/server.crt\ntls-key = /etc/minikv/server.key\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.TLSEnabled() {
+		t.Error("TLSEnabled() = false, want true")
+	}
+}
+
+func TestLoad_authTokenAccepted(t *testing.T) {
+	path := writeTempConfig(t, "auth-token = s3cret-bearer-value\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AuthToken != "s3cret-bearer-value" {
+		t.Errorf("AuthToken = %q", cfg.AuthToken)
+	}
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -61,13 +62,13 @@ func run(parent context.Context, cfg config.Config, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	listener, err := net.Listen("tcp", cfg.Addr)
+	listener, scheme, err := listen(cfg)
 	if err != nil {
 		return err
 	}
 	defer listener.Close()
 
-	logger.Info("listening", "addr", listener.Addr().String())
+	logger.Info("listening", "addr", listener.Addr().String(), "scheme", scheme, "auth", cfg.AuthToken != "")
 
 	kv := store.New(store.Config{
 		MaxValueBytes:     cfg.MaxValueBytes,
@@ -75,6 +76,7 @@ func run(parent context.Context, cfg config.Config, logger *slog.Logger) error {
 		ItemOverheadBytes: cfg.ItemOverheadBytes,
 		Shards:            cfg.Shards,
 	})
+	srv := server.New(kv).WithAuthToken(cfg.AuthToken)
 	var wg sync.WaitGroup
 	go func() {
 		<-ctx.Done()
@@ -99,11 +101,30 @@ func run(parent context.Context, cfg config.Config, logger *slog.Logger) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := server.ServeConn(conn, kv); err != nil {
+			if err := srv.ServeConn(conn); err != nil {
 				logger.Warn("connection closed with error", "remote", conn.RemoteAddr().String(), "error", err)
 			}
 		}()
 	}
+}
+
+// listen returns a listener bound per cfg, plus a scheme tag ("tcp" or
+// "tls") for the startup log.
+func listen(cfg config.Config) (net.Listener, string, error) {
+	if !cfg.TLSEnabled() {
+		l, err := net.Listen("tcp", cfg.Addr)
+		return l, "tcp", err
+	}
+	cert, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
+	if err != nil {
+		return nil, "", fmt.Errorf("load tls keypair: %w", err)
+	}
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	l, err := tls.Listen("tcp", cfg.Addr, tlsCfg)
+	return l, "tls", err
 }
 
 func servePprof(ctx context.Context, addr string, logger *slog.Logger) {

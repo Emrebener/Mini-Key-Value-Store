@@ -123,6 +123,8 @@ cleanup-interval    = 1m
 | `item-overhead-bytes` | Per-item bookkeeping bytes added to `len(key) + len(value)`. Memory accounting is intentionally explicit rather than pretending to match Go's runtime/map overhead exactly. |
 | `cleanup-interval` | How often the background sweeper removes expired keys. `0s` disables. Expired keys are also cleaned lazily on access. |
 | `pprof-addr` | HTTP address for `net/http/pprof` handlers. Empty (the default) disables; set to e.g. `0.0.0.0:6060` to enable for benchmarking and debugging. |
+| `tls-cert`, `tls-key` | PEM-encoded certificate and private key paths. Set both to wrap the listener in TLS; leave both empty for plain TCP. Setting only one is a configuration error. |
+| `auth-token` | Bearer token required as the first command on each connection (`AUTH <token>\r\n`). Empty (the default) disables authentication. |
 
 Unknown keys, malformed lines, and out-of-range numeric values are rejected at
 startup with an error that names the file and line number.
